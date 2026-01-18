@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package mona.events.v1;
+
+// Note: compiled at runtime (no protoc requirement)
+
+message Envelope {
+  string id = 1;
+  int64 ts_unix_ms = 2;
+  string subject = 3;
+
+  // routing
+  string shard_id = 10;
+  string device_id = 11;
+  string ip = 12;
+  string mac = 13;
+
+  oneof payload {
+    DeviceDiscovered device_discovered = 100;
+    NetworkObserved network_observed = 101;
+    PollRequest poll_request = 102;
+    PollResult poll_result = 103;
+    DeviceStateUpdated device_state_updated = 104;
+    AlertRaised alert_raised = 105;
+  }
+}
+
+message DeviceDiscovered {
+  string ip = 1;
+  string mac = 2;
+  string source = 3; // e.g. scanner.tcp / mikrotik.dhcp
+  string shard_id = 4;
+  map<string,string> labels = 10;
+}
+
+message NetworkObserved {
+  string ip = 1;
+  string mac = 2;
+  bool online = 3;
+  string source = 4;
+  map<string,string> facts = 10;
+}
+
+message PollRequest {
+  string device_id = 1;
+  string ip = 2;
+  string vendor = 3;
+  string firmware = 4;
+  string profile = 5;
+}
+
+message PollResult {
+  string device_id = 1;
+  bool ok = 2;
+  string error = 3;
+  map<string,string> raw = 10;
+}
+
+message DeviceStateUpdated {
+  string device_id = 1;
+  string ip = 2;
+  bool online = 3;
+  double hashrate_ths = 4;
+  double temp_max_c = 5;
+  uint32 fan_rpm_max = 6;
+  uint32 power_w = 7;
+  uint64 uptime_s = 8;
+  uint32 reboot_count_1h = 9;
+  map<string,string> meta = 20;
+}
+
+message AlertRaised {
+  string device_id = 1;
+  string severity = 2; // info/warn/crit
+  string code = 3;
+  string message = 4;
+  map<string,string> tags = 10;
+}
+
