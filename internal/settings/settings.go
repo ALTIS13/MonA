@@ -73,9 +73,9 @@ func Defaults() Settings {
 		},
 
 		Scanner: Scanner{
-			Concurrency: 256,
-			DialTimeout: 600 * time.Millisecond,
-			HTTPTimeout: 1 * time.Second,
+			Concurrency: 96,
+			DialTimeout: 1200 * time.Millisecond,
+			HTTPTimeout: 1200 * time.Millisecond,
 		},
 		Subnets: nil,
 

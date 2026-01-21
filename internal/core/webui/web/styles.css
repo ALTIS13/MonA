@@ -76,6 +76,10 @@ body::before{
   background: linear-gradient(135deg, rgba(124,140,255,0.55), rgba(52,211,153,0.35));
   border: 1px solid rgba(255,255,255,0.14);
   width: fit-content;
+  max-width: 100%;
+  white-space: nowrap;
+}
+.logo .logo-mini{display:none}
 }
 .sb-sub{color:var(--muted); font-size:12px; padding-left:2px}
 
@@ -128,6 +132,8 @@ body.sb-collapsed .logo{
   text-align:center;
   overflow:hidden;
 }
+body.sb-collapsed .logo .logo-full{display:none}
+body.sb-collapsed .logo .logo-mini{display:inline}
 body.sb-collapsed .sb-ico{margin: 0 auto}
 body.sb-collapsed .sb-item{justify-content:center; padding: 10px 8px}
 body.sb-collapsed .sb-foot{display:flex; justify-content:center}
@@ -206,6 +212,8 @@ body.sb-collapsed .sb-foot .pill{
 .bad{color: var(--bad)}
 .muted{color: var(--muted)}
 .spark{
+  width: 280px;
+  height: 70px;
   border-radius: 10px;
   border: 1px solid rgba(255,255,255,0.10);
   background: rgba(255,255,255,0.03);
@@ -245,6 +253,7 @@ body.sb-collapsed .sb-foot .pill{
   color: var(--text);
 }
 .card-bot{display:flex; align-items:center; justify-content:space-between; gap: 10px; margin-top: 10px}
+.card.kpi .card-bot{flex-wrap:wrap}
 
 .badge{
   font-size: 11px;
@@ -535,6 +544,22 @@ tr:hover td{background: rgba(255,255,255,0.03)}
       rgba(255,255,255,0.85) 360deg);
   animation: fanSpin var(--dur, 1.0s) linear infinite;
   box-shadow: inset 0 0 0 2px rgba(0,0,0,0.20);
+}
+.fan.fan-lg{
+  width: 22px;
+  height: 22px;
+  border-width: 1px;
+  box-shadow: inset 0 0 0 3px rgba(0,0,0,0.25), 0 0 10px rgba(124,140,255,0.25);
+  background:
+    radial-gradient(circle at center, rgba(255,255,255,0.95) 0 2px, transparent 3px),
+    conic-gradient(from 0deg,
+      rgba(124,140,255,0.95) 0deg,
+      rgba(255,255,255,0.10) 60deg,
+      rgba(124,140,255,0.95) 120deg,
+      rgba(255,255,255,0.10) 180deg,
+      rgba(124,140,255,0.95) 240deg,
+      rgba(255,255,255,0.10) 300deg,
+      rgba(124,140,255,0.95) 360deg);
 }
 .fan.stop{
   animation: none;

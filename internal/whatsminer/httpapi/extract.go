@@ -7,139 +7,34 @@ import (
 
 type Facts struct {
 	Model       string
-	Firmware    string
-	Worker      string
 	UptimeS     uint64
 	HashrateTHS float64
 	FansRPM     []int
 	TempsC      []float64
 }
 
-// ExtractFacts tries to pull common fields from a variety of Vnish/Anthill-like JSONs.
+// ExtractFacts best-effort for Whatsminer JSON responses.
 func ExtractFacts(res ProbeResult) Facts {
 	var f Facts
-
-	// if probe guessed kind
-	if res.Kind != "" {
-		f.Firmware = res.Kind
-	}
-
-	// Prefer known Anthill/Vnish structure (api/v1/summary)
-	if v, ok := res.Responses["/api/v1/summary"]; ok {
-		if m, ok := v.(map[string]any); ok {
-			if miner, ok := m["miner"].(map[string]any); ok {
-				if t, ok := miner["miner_type"].(string); ok && strings.TrimSpace(t) != "" {
-					f.Model = strings.TrimSpace(t)
-					if strings.Contains(strings.ToLower(f.Model), "vnish") || strings.Contains(strings.ToLower(f.Model), "anthill") {
-						if f.Firmware == "" {
-							f.Firmware = "VnishOS"
-						}
-					}
-				}
-				// Hashrate: prefer average_hashrate / instant_hashrate (already in TH/s in many builds)
-				if f.HashrateTHS == 0 {
-					if x := toF64(miner["average_hashrate"]); x > 0 {
-						if x < 10000 {
-							f.HashrateTHS = x
-						} else {
-							f.HashrateTHS = x / 1000.0
-						}
-					} else if x := toF64(miner["instant_hashrate"]); x > 0 {
-						if x < 10000 {
-							f.HashrateTHS = x
-						} else {
-							f.HashrateTHS = x / 1000.0
-						}
-					} else if x := toF64(miner["hr_realtime"]); x > 0 {
-						// often GH/s
-						f.HashrateTHS = x / 1000.0
-					} else if x := toF64(miner["hr_average"]); x > 0 {
-						f.HashrateTHS = x / 1000.0
-					}
-				}
-				// Fans: cooling.fans[].rpm
-				if len(f.FansRPM) == 0 {
-					if cool, ok := miner["cooling"].(map[string]any); ok {
-						if fans, ok := cool["fans"].([]any); ok {
-							out := make([]int, 0, len(fans))
-							for _, fx := range fans {
-								fm, ok := fx.(map[string]any)
-								if !ok {
-									continue
-								}
-								out = append(out, int(toU64(fm["rpm"])))
-							}
-							if len(out) > 0 {
-								f.FansRPM = out
-							}
-						}
-					}
-				}
-				// Temps: miner.chip_temp.max and pcb_temp.max
-				if len(f.TempsC) == 0 {
-					var out []float64
-					if ct, ok := miner["chip_temp"].(map[string]any); ok {
-						if mx := toF64(ct["max"]); mx > 0 {
-							out = append(out, mx)
-						}
-					}
-					if pt, ok := miner["pcb_temp"].(map[string]any); ok {
-						if mx := toF64(pt["max"]); mx > 0 {
-							out = append(out, mx)
-						}
-					}
-					if len(out) > 0 {
-						f.TempsC = out
-					}
-				}
-				// Worker: pools[0].user (may be masked)
-				if f.Worker == "" {
-					if pools, ok := miner["pools"].([]any); ok {
-						for _, px := range pools {
-							pm, ok := px.(map[string]any)
-							if !ok {
-								continue
-							}
-							if u, ok := pm["user"].(string); ok && strings.TrimSpace(u) != "" && u != "*****" {
-								f.Worker = strings.TrimSpace(u)
-								break
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-	if v, ok := res.Responses["/api/v1/status"]; ok && f.UptimeS == 0 {
-		if m, ok := v.(map[string]any); ok {
-			// miner_state_time is seconds in your sample.
-			f.UptimeS = toU64(m["miner_state_time"])
-		}
-	}
-
-	// scan all json maps for some common keys (fallback)
 	for _, v := range res.Responses {
-		f.Model = firstNonEmpty(f.Model, findStringDeep(v, set("model", "type", "miner_type", "device", "product")))
-		f.Worker = firstNonEmpty(f.Worker, findStringDeep(v, set("worker", "user", "pooluser", "username")))
+		f.Model = firstNonEmpty(f.Model, findStringDeep(v, set("model", "type", "miner_type", "product", "miner_model")))
 		if f.UptimeS == 0 {
 			f.UptimeS = findU64Deep(v, set("uptime", "elapsed", "elapsed_s", "uptime_s"))
 		}
 		if f.HashrateTHS == 0 {
-			// common: rate_5s + rate_unit (GH/s)
-			hs := findF64Deep(v, set("hashrate", "rate_5s", "hashrate_5s", "hashrate5s", "average_hashrate", "instant_hashrate", "hr_realtime", "hr_average"))
+			hs := findF64Deep(v, set("hashrate", "rate_5s", "hashrate_5s", "hashrate5s", "mhs av", "mhs 5s", "ghs 5s"))
 			if hs > 0 {
 				unit := strings.ToLower(findStringDeep(v, set("rate_unit", "unit", "hashrate_unit")))
-				if strings.Contains(unit, "gh") {
+				switch {
+				case strings.Contains(unit, "gh"):
 					f.HashrateTHS = hs / 1000.0
-				} else if strings.Contains(unit, "th") {
+				case strings.Contains(unit, "th"):
 					f.HashrateTHS = hs
-				} else {
-					// Heuristic: Vnish average_hashrate is often TH/s already.
-					if hs < 10000 {
-						f.HashrateTHS = hs
-					} else {
-						f.HashrateTHS = hs / 1000.0
-					}
+				case strings.Contains(unit, "mh"):
+					f.HashrateTHS = hs / 1e6
+				default:
+					// best guess: Whatsminer often reports MH/s
+					f.HashrateTHS = hs / 1e6
 				}
 			}
 		}
@@ -147,10 +42,9 @@ func ExtractFacts(res ProbeResult) Facts {
 			f.FansRPM = findIntSliceDeep(v, "fan", "fans", "fan_rpm", "fans_rpm")
 		}
 		if len(f.TempsC) == 0 {
-			f.TempsC = findFloatSliceDeep(v, "temp", "temps", "temp_chip", "temp_pcb", "temperature", "temperatures")
+			f.TempsC = findFloatSliceDeep(v, "temp", "temps", "temp_chip", "temperature", "temperatures")
 		}
 	}
-
 	return f
 }
 
@@ -191,12 +85,6 @@ func findStringDeep(v any, wanted map[string]struct{}) string {
 	case []any:
 		for _, vv := range x {
 			if s := findStringDeep(vv, wanted); s != "" {
-				return s
-			}
-		}
-	case []map[string]any:
-		for _, m := range x {
-			if s := findStringDeep(m, wanted); s != "" {
 				return s
 			}
 		}

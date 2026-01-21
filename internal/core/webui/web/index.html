@@ -10,7 +10,7 @@
     <div class="shell">
       <aside class="sidebar" id="sidebar">
         <div class="sb-head">
-          <div class="logo">MonA</div>
+          <div class="logo"><span class="logo-full">MonA</span><span class="logo-mini">M</span></div>
           <div class="sb-sub" id="ver">v0</div>
         </div>
         <nav class="sb-nav">
@@ -89,11 +89,10 @@
                     <div class="k">Total Hashrate</div>
                     <div class="v" id="kpi_hash">0 TH/s</div>
                   </div>
-                  <canvas class="spark" id="sp_hash" width="140" height="36"></canvas>
+                  <canvas class="spark" id="sp_hash" width="280" height="70"></canvas>
                 </div>
                 <div class="card-bot">
                   <span class="badge badge-warn">LIVE</span>
-                  <span class="muted">from cgminer 4028 (best-effort)</span>
                   <select id="dash_refresh" class="select" title="Dashboard refresh interval">
                     <option value="5000">5s</option>
                     <option value="10000" selected>10s</option>
@@ -179,6 +178,9 @@
           <section id="page_devices" class="hidden">
             <section class="controls">
               <input id="q" class="input" placeholder="search ip/mac/vendor/model/worker…" />
+              <input id="client" class="input" placeholder="client / worker" />
+              <input id="hash_min" class="input" placeholder="hash min (TH/s)" />
+              <input id="hash_max" class="input" placeholder="hash max (TH/s)" />
               <select id="online" class="select">
                 <option value="all">all</option>
                 <option value="online">online</option>

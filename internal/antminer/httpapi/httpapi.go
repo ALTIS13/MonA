@@ -72,11 +72,23 @@ func ProbeAntminerSchemes(ctx context.Context, host string, creds []Cred, scheme
 		return b
 	}
 
-	perReqTimeout := func(scheme string) time.Duration {
+	perReqTimeout := func(ctx context.Context, scheme string) time.Duration {
+		base := 2400 * time.Millisecond
 		if scheme == "https" {
-			return 1800 * time.Millisecond
+			base = 3200 * time.Millisecond
 		}
-		return 1400 * time.Millisecond
+		if dl, ok := ctx.Deadline(); ok {
+			rem := time.Until(dl)
+			if rem > 0 && rem < base+400*time.Millisecond {
+				// keep some room for response parsing
+				adj := rem / 2
+				if adj < 900*time.Millisecond {
+					adj = 900 * time.Millisecond
+				}
+				return adj
+			}
+		}
+		return base
 	}
 
 	tryScheme := func(scheme string, cred Cred) ProbeResult {
@@ -90,7 +102,7 @@ func ProbeAntminerSchemes(ctx context.Context, host string, creds []Cred, scheme
 		lastErr := ""
 
 		for _, p := range endpoints {
-			reqCtx, cancel := context.WithTimeout(ctx, perReqTimeout(scheme))
+			reqCtx, cancel := context.WithTimeout(ctx, perReqTimeout(ctx, scheme))
 			url := scheme + "://" + host + p
 			req, _ := http.NewRequestWithContext(reqCtx, "GET", url, nil)
 			req.Close = true
@@ -119,7 +131,7 @@ func ProbeAntminerSchemes(ctx context.Context, host string, creds []Cred, scheme
 				ch, ok := parseDigestChallenge(resp.Header.Get("WWW-Authenticate"))
 				if ok && cred.Username != "" {
 					// retry once with Digest
-					ctx2, cancel2 := context.WithTimeout(ctx, perReqTimeout(scheme))
+					ctx2, cancel2 := context.WithTimeout(ctx, perReqTimeout(ctx, scheme))
 					req2, _ := http.NewRequestWithContext(ctx2, "GET", url, nil)
 					req2.Close = true
 					req2.Header.Set("Connection", "close")
@@ -127,10 +139,10 @@ func ProbeAntminerSchemes(ctx context.Context, host string, creds []Cred, scheme
 					req2.Header.Set("Accept", "application/json,text/plain;q=0.9,*/*;q=0.8")
 					req2.Header.Set("Authorization", buildDigestAuth(cred.Username, cred.Password, "GET", p, ch))
 					resp2, err := client.Do(req2)
-					cancel2()
 					if err == nil {
 						b2, _ := io.ReadAll(io.LimitReader(resp2.Body, 256*1024))
 						_ = resp2.Body.Close()
+						cancel2()
 						body2 := strings.TrimSpace(string(b2))
 						if resp2.StatusCode >= 200 && resp2.StatusCode <= 299 && body2 != "" {
 							low2 := strings.ToLower(body2)
@@ -148,6 +160,8 @@ func ProbeAntminerSchemes(ctx context.Context, host string, creds []Cred, scheme
 								}
 							}
 						}
+					} else {
+						cancel2()
 					}
 				}
 				lastErr = "unauthorized"

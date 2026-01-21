@@ -22,6 +22,9 @@ const state = {
   asic: "asic",
   vendor: "all",
   model: "all",
+  client: "",
+  hashMin: "",
+  hashMax: "",
   dashRefreshMs: 10000,
   lastDashSampleTs: 0,
   lastDashDrawTs: 0,
@@ -269,7 +272,18 @@ function renderDashboard() {
   const list = $("offline_list");
   if (list) {
     const off = (state.devices || [])
-      .filter((d) => !d.online)
+      .filter((d) => {
+        if (d.online) return false;
+        // real offline = previously enriched/identified
+        return (
+          (d.mac && d.mac !== "") ||
+          (d.model && d.model !== "") ||
+          (d.firmware && d.firmware !== "") ||
+          (d.worker && d.worker !== "") ||
+          Number(d.hashrate_ths || 0) > 0 ||
+          (Array.isArray(d.fans_rpm) && d.fans_rpm.length > 0)
+        );
+      })
       .slice()
       .sort((a, b) => (b.last_seen || "").localeCompare(a.last_seen || ""))
       .slice(0, 24);
@@ -288,6 +302,9 @@ function renderDashboard() {
 
 function applyDeviceFilters(devices) {
   const q = state.q.trim().toLowerCase();
+  const client = state.client.trim().toLowerCase();
+  const hashMin = Number(state.hashMin || 0);
+  const hashMax = Number(state.hashMax || 0);
   const online = state.online;
   const asic = state.asic;
   const vendor = state.vendor;
@@ -295,9 +312,18 @@ function applyDeviceFilters(devices) {
   return devices.filter((d) => {
     if (online === "online" && !d.online) return false;
     if (online === "offline" && d.online) return false;
-    if (asic === "asic" && Number(d.confidence || 0) < 60) return false;
+    if (asic === "asic") {
+      const conf = Number(d.confidence || 0);
+      const v = (d.vendor || "").toLowerCase();
+      if (v === "non-asic") return false;
+      if (conf < 60) return false;
+    }
     if (vendor !== "all" && (d.vendor || "") !== vendor) return false;
     if (model !== "all" && (d.model || "") !== model) return false;
+    if (client && !(d.worker || "").toLowerCase().includes(client)) return false;
+    const h = Number(d.hashrate_ths || 0);
+    if (hashMin && h < hashMin) return false;
+    if (hashMax && h > hashMax) return false;
     if (!q) return true;
     const hay = `${d.ip} ${d.mac} ${d.vendor} ${d.model} ${d.worker}`.toLowerCase();
     return hay.includes(q);
@@ -416,7 +442,7 @@ function renderDeviceDetails(d) {
           .slice(0, 10)
           .map((rpm, idx) => {
             const n = Number(rpm || 0);
-            const cls = n > 0 ? "fan" : "fan stop";
+            const cls = n > 0 ? "fan fan-lg" : "fan fan-lg stop";
             const dur = n > 0 ? Math.max(0.25, Math.min(1.6, 6000 / Math.max(600, n))).toFixed(2) : "0";
             return `<div class="fanbox"><span class="${cls}" style="--dur:${dur}s" title="${n} rpm"></span><span class="fanrpm">fan${idx + 1}: ${n} rpm</span></div>`;
           })
@@ -640,6 +666,9 @@ function initControls() {
     });
   }
   if ($("log_q")) $("log_q").addEventListener("input", () => renderLogs());
+  if ($("client")) $("client").addEventListener("input", (e) => { state.client = e.target.value || ""; renderDevices(state.devices); });
+  if ($("hash_min")) $("hash_min").addEventListener("input", (e) => { state.hashMin = e.target.value || ""; renderDevices(state.devices); });
+  if ($("hash_max")) $("hash_max").addEventListener("input", (e) => { state.hashMax = e.target.value || ""; renderDevices(state.devices); });
   if ($("dash_refresh")) {
     // initialize from default select value
     const initV = Number($("dash_refresh").value || 10000);

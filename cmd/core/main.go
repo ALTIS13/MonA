@@ -36,6 +36,7 @@ import (
 	"asic-control/internal/netutil"
 	"asic-control/internal/secrets"
 	"asic-control/internal/settings"
+	whhttp "asic-control/internal/whatsminer/httpapi"
 	vnishhttp "asic-control/internal/vnish/httpapi"
 	"asic-control/internal/version"
 )
@@ -142,6 +143,25 @@ func main() {
 		}
 	}
 
+	probeTimeoutFor := func(d *registry.Device) time.Duration {
+		// Adaptive timeout: reduce flakiness on busy fleets and slow HTTP stacks.
+		if d == nil {
+			return 6 * time.Second
+		}
+		err := strings.ToLower(d.AuthError)
+		fw := strings.ToLower(d.Firmware)
+		if strings.Contains(err, "deadline exceeded") || strings.Contains(err, "timeout") {
+			return 9 * time.Second
+		}
+		if strings.Contains(fw, "anthill") || strings.Contains(fw, "vnish") {
+			return 8 * time.Second
+		}
+		if strings.ToLower(d.AuthStatus) == "ok" {
+			return 4 * time.Second
+		}
+		return 6 * time.Second
+	}
+
 	// Build credential candidates for a device. Tries all enabled creds first (priority desc),
 	// then optionally defaults (Settings.TryDefaultCreds).
 	buildCreds := func(d *registry.Device) []httpapi.Cred {
@@ -241,6 +261,13 @@ func main() {
 		}
 		return out
 	}
+	toWhatsCreds := func(in []httpapi.Cred) []whhttp.Cred {
+		out := make([]whhttp.Cred, 0, len(in))
+		for _, c := range in {
+			out = append(out, whhttp.Cred{Name: c.Name, Username: c.Username, Password: c.Password})
+		}
+		return out
+	}
 
 	runProbe := func(ctx context.Context, ip string) httpapi.ProbeResult {
 		d, ok := store.Get(ip)
@@ -261,8 +288,48 @@ func main() {
 			dd.AuthUpdated = time.Now().UTC()
 			dd.AuthError = ""
 		})
-		// antminer first (stock JSON CGI) but if device looks like vnish/anthill, try vnish probe.
 		v := strings.ToLower(strings.TrimSpace(d.Vendor))
+		// whatsminer probe
+		if v == "whatsminer" {
+			creds := buildCreds(d)
+			schemes := []string{"http"}
+			wres := whhttp.Probe(ctx, ip, toWhatsCreds(creds), schemes)
+			if wres.OK {
+				f := whhttp.ExtractFacts(wres)
+				store.UpdateEnrichment(ip, func(dd *registry.Device) {
+					dd.AuthStatus = "ok"
+					dd.AuthUpdated = time.Now().UTC()
+					dd.AuthCredName = wres.UsedCred
+					dd.AuthError = ""
+					dd.Vendor = "whatsminer"
+					if f.Model != "" {
+						dd.Model = f.Model
+					}
+					if f.UptimeS > 0 {
+						dd.UptimeS = f.UptimeS
+					}
+					if f.HashrateTHS > 0 {
+						dd.HashrateTHS = f.HashrateTHS
+					}
+					if len(f.FansRPM) > 0 {
+						dd.FansRPM = f.FansRPM
+					}
+					if len(f.TempsC) > 0 {
+						dd.TempsC = f.TempsC
+					}
+				})
+				return httpapi.ProbeResult{OK: true, Scheme: wres.Scheme, UsedCred: wres.UsedCred, Error: "", Responses: map[string]any{"whatsminer": wres.Responses}}
+			}
+			store.UpdateEnrichment(ip, func(dd *registry.Device) {
+				dd.AuthStatus = "fail"
+				dd.AuthUpdated = time.Now().UTC()
+				dd.AuthCredName = wres.UsedCred
+				dd.AuthError = wres.Error
+			})
+			return httpapi.ProbeResult{OK: false, Error: wres.Error}
+		}
+
+		// antminer first (stock JSON CGI) but if device looks like vnish/anthill, try vnish probe.
 		if v != "antminer" && v != "asic" && v != "" && v != "unknown" {
 			store.UpdateEnrichment(ip, func(dd *registry.Device) {
 				dd.AuthStatus = "fail"
@@ -396,7 +463,12 @@ func main() {
 					return httpapi.ProbeResult{OK: true, Scheme: vres.Scheme, UsedCred: vres.UsedCred, Error: "", Responses: map[string]any{"vnish": vres.Responses}}
 				}
 			}
+			// Avoid auth flapping: do not downgrade OK->FAIL on transient errors.
 			store.UpdateEnrichment(ip, func(dd *registry.Device) {
+				if strings.ToLower(dd.AuthStatus) == "ok" && time.Since(dd.AuthUpdated) < 10*time.Minute {
+					dd.AuthError = res.Error
+					return
+				}
 				dd.AuthStatus = "fail"
 				dd.AuthUpdated = time.Now().UTC()
 				dd.AuthCredName = res.UsedCred
@@ -406,8 +478,8 @@ func main() {
 		return res
 	}
 
-	// workers
-	workers := 16
+	// workers (faster enrichment for large fleets; bounded by per-IP backoff)
+	workers := 48
 	for i := 0; i < workers; i++ {
 		go func() {
 			for {
@@ -415,7 +487,11 @@ func main() {
 				case <-rootCtx.Done():
 					return
 				case req := <-probeCh:
-					ctx, cancel := context.WithTimeout(rootCtx, 5*time.Second)
+					var d *registry.Device
+					if dd, ok := store.Get(req.IP); ok {
+						d = dd
+					}
+					ctx, cancel := context.WithTimeout(rootCtx, probeTimeoutFor(d))
 					_ = runProbe(ctx, req.IP)
 					cancel()
 				}
@@ -507,14 +583,30 @@ func main() {
 				store.UpdateEnrichment(ip, func(d *registry.Device) {
 					d.OpenPorts = res.Open
 					d.Confidence = res.Confidence
-					d.Vendor = res.Vendor
-					d.Model = res.Model
-					d.Firmware = res.Firmware
-					d.Worker = res.Worker
-					d.UptimeS = res.UptimeS
-					d.HashrateTHS = res.HashrateTHS
-					d.FansRPM = res.FansRPM
-					d.TempsC = res.TempsC
+					if res.Vendor != "" {
+						d.Vendor = res.Vendor
+					}
+					if res.Model != "" {
+						d.Model = res.Model
+					}
+					if res.Firmware != "" {
+						d.Firmware = res.Firmware
+					}
+					if res.Worker != "" {
+						d.Worker = res.Worker
+					}
+					if res.UptimeS > 0 {
+						d.UptimeS = res.UptimeS
+					}
+					if res.HashrateTHS > 0 {
+						d.HashrateTHS = res.HashrateTHS
+					}
+					if len(res.FansRPM) > 0 {
+						d.FansRPM = res.FansRPM
+					}
+					if len(res.TempsC) > 0 {
+						d.TempsC = res.TempsC
+					}
 				})
 
 				if !res.IsASIC {

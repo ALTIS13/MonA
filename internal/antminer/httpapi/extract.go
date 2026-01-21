@@ -44,7 +44,7 @@ func ExtractFacts(res ProbeResult) Facts {
 	// get_system_info.cgi is usually the most reliable for model/fw/mac.
 	if anyv, ok := res.Responses["/cgi-bin/get_system_info.cgi"]; ok {
 		if m, ok := anyv.(map[string]any); ok {
-			f.Model = pickString(m, "model", "Model", "miner_type", "type", "minerType")
+			f.Model = pickString(m, "model", "Model", "miner_type", "type", "minerType", "minertype", "minerType")
 			f.Firmware = pickString(m, "fw_ver", "firmware", "Firmware", "version", "miner_version", "minerVersion")
 			f.MAC = normalizeMAC(pickString(m, "mac", "Mac", "macaddr", "mac_addr", "mac_address", "MAC", "MacAddr"))
 			if f.MAC == "" {

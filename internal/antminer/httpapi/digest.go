@@ -75,6 +75,10 @@ func buildDigestAuth(username, password, method, uri string, c digestChallenge) 
 		// fallback: no qop provided/usable
 		qop = ""
 	}
+	// Support MD5-sess (common in some lighttpd configs)
+	if strings.Contains(strings.ToLower(c.Algo), "md5-sess") {
+		ha1 = md5hex(ha1 + ":" + c.Nonce + ":" + cnonce)
+	}
 
 	var resp string
 	if qop != "" {

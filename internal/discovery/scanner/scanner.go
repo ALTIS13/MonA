@@ -62,7 +62,8 @@ func New(cfg Config) *Scanner {
 	}
 	if len(cfg.Ports) == 0 {
 		// Common: web UIs + cgminer API + ssh.
-		cfg.Ports = []int{80, 443, 4028, 22}
+		// Note: skipping 22 by default significantly speeds scans and reduces false negatives.
+		cfg.Ports = []int{80, 443, 4028}
 	}
 	return &Scanner{
 		cfg: cfg,
@@ -89,6 +90,8 @@ func (s *Scanner) ScanSpec(ctx context.Context, spec string, onProgress func(don
 
 	jobs := make(chan net.IP, s.cfg.Concurrency*2)
 	var wg sync.WaitGroup
+	var missMu sync.Mutex
+	misses := make([]net.IP, 0, 1024)
 
 	done := 0
 	var mu sync.Mutex
@@ -110,9 +113,14 @@ func (s *Scanner) ScanSpec(ctx context.Context, spec string, onProgress func(don
 		go func() {
 			defer wg.Done()
 			for ip := range jobs {
-				r := s.probeIP(ctx, ip)
+				r := s.probeIPWithTimeout(ctx, ip, s.cfg.DialTimeout)
 				if onResult != nil && (r.Online || len(r.Open) > 0) {
 					onResult(r)
+				}
+				if !r.Online && len(r.Open) == 0 {
+					missMu.Lock()
+					misses = append(misses, ip)
+					missMu.Unlock()
 				}
 				mu.Lock()
 				done++
@@ -166,23 +174,66 @@ func (s *Scanner) ScanSpec(ctx context.Context, spec string, onProgress func(don
 	close(jobs)
 	wg.Wait()
 	report()
+
+	// Retry pass for misses with lower concurrency and higher timeouts.
+	if len(misses) > 0 && ctx.Err() == nil {
+		retryConc := s.cfg.Concurrency / 4
+		if retryConc < 24 {
+			retryConc = 24
+		}
+		retryJobs := make(chan net.IP, retryConc*2)
+		var retryWG sync.WaitGroup
+		for i := 0; i < retryConc; i++ {
+			retryWG.Add(1)
+			go func() {
+				defer retryWG.Done()
+				for ip := range retryJobs {
+					r := s.probeIPWithTimeout(ctx, ip, s.cfg.DialTimeout*3)
+					if onResult != nil && (r.Online || len(r.Open) > 0) {
+						onResult(r)
+					}
+				}
+			}()
+		}
+		for _, ip := range misses {
+			select {
+			case <-ctx.Done():
+				break
+			case retryJobs <- ip:
+			}
+		}
+		close(retryJobs)
+		retryWG.Wait()
+	}
 	return nil
 }
 
 func (s *Scanner) probeIP(ctx context.Context, ip net.IP) Result {
+	return s.probeIPWithTimeout(ctx, ip, s.cfg.DialTimeout)
+}
+
+func (s *Scanner) probeIPWithTimeout(ctx context.Context, ip net.IP, dialTimeout time.Duration) Result {
 	r := Result{IP: ip}
 	host := ip.String()
 
 	open := make([]int, 0, len(s.cfg.Ports))
 	for _, p := range s.cfg.Ports {
-		ok := tcpOpen(ctx, host, p, s.cfg.DialTimeout)
+		ok := tcpOpen(ctx, host, p, dialTimeout)
 		// Retry critical ports once (ASIC web/cgminer are sometimes slow to accept).
 		if !ok && (p == 80 || p == 443 || p == 4028) {
 			time.Sleep(25 * time.Millisecond)
-			ok = tcpOpen(ctx, host, p, s.cfg.DialTimeout*2)
+			ok = tcpOpen(ctx, host, p, dialTimeout*2)
 		}
 		if ok {
 			open = append(open, p)
+		}
+	}
+	// If still no open ports, do a single slow recheck on critical ports.
+	if len(open) == 0 {
+		for _, p := range []int{80, 443, 4028} {
+			if tcpOpen(ctx, host, p, dialTimeout*3) {
+				open = append(open, p)
+			}
 		}
 	}
 	r.Open = open
@@ -306,6 +357,7 @@ func (s *Scanner) fingerprintHTTP(ctx context.Context, r *Result, url string) {
 	if strings.Contains(server, "antminer") {
 		r.Vendor = "antminer"
 	}
+	isLighttpd := strings.Contains(server, "lighttpd")
 
 	// small body sniff
 	buf := make([]byte, 2048)
@@ -313,6 +365,9 @@ func (s *Scanner) fingerprintHTTP(ctx context.Context, r *Result, url string) {
 	body := strings.ToLower(string(buf[:n]))
 
 	switch {
+	case strings.Contains(body, "unifi") || strings.Contains(body, "ubnt") || strings.Contains(body, "camera"):
+		// common non-ASIC web UIs (avoid false positives)
+		r.Vendor = "non-asic"
 	case strings.Contains(body, "antminer"):
 		r.Vendor = "antminer"
 	case strings.Contains(body, `meta name="firmware"`) && strings.Contains(body, "anthillos"):
@@ -336,7 +391,29 @@ func (s *Scanner) fingerprintHTTP(ctx context.Context, r *Result, url string) {
 		}
 	}
 
-	_ = url // future: parse model/firmware
+	// If vendor is still unknown but it's lighttpd, try an auth-only hint.
+	// Many Antminer stock firmwares respond 401 to /cgi-bin/summary.cgi quickly.
+	if r.Vendor == "" && isLighttpd {
+		s.tryAntminerAuthHint(ctx, r, strings.TrimRight(url, "/"))
+	}
+}
+
+func (s *Scanner) tryAntminerAuthHint(ctx context.Context, r *Result, base string) {
+	u := base + "/cgi-bin/summary.cgi"
+	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
+	req.Header.Set("User-Agent", "MonA/asic-control")
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return
+	}
+	_, _ = io.ReadAll(io.LimitReader(resp.Body, 256))
+	_ = resp.Body.Close()
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		r.Vendor = "antminer"
+		if r.Firmware == "" {
+			r.Firmware = "stock"
+		}
+	}
 }
 
 func (s *Scanner) fingerprintCGMiner(ctx context.Context, r *Result, host string, port int) {
@@ -557,6 +634,9 @@ func denseFloats(m map[int]float64, from, to int) []float64 {
 
 func (s *Scanner) score(r *Result) int {
 	score := 0
+	if r.Vendor == "non-asic" {
+		return 0
+	}
 	if r.Vendor != "" && r.Vendor != "asic" {
 		score += 40
 	} else if r.Vendor == "asic" {
@@ -565,6 +645,12 @@ func (s *Scanner) score(r *Result) int {
 	// If we strongly identified Bitmain/Antminer via HTTP, allow ASIC classification even without 4028 open.
 	if r.Vendor == "antminer" && (hasPort(r.Open, 80) || hasPort(r.Open, 443)) {
 		score += 15
+	}
+	if r.Model != "" {
+		score += 25
+	}
+	if r.Firmware != "" {
+		score += 10
 	}
 	if hasPort(r.Open, 4028) {
 		score += 35
