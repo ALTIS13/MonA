@@ -17,7 +17,15 @@ On-prem platform for ASIC discovery/monitoring/control (btcTools-like), optimize
   - TCP ports probe
   - cgminer API probe (4028): worker, uptime, hashrate (best-effort)
   - model/vendor normalization (best-effort)
-- **Credentials (defaults)** tab + optional limited HTTP probes with defaults (toggle in Settings)
+- **Credentials (stored, encrypted)**:
+  - managed in UI
+  - stored encrypted in `data/settings.json` using `data/secret.key`
+- **Antminer deep probe (stock)**:
+  - `/cgi-bin/summary.cgi` + `/cgi-bin/stats.cgi`
+  - supports **Basic** and **Digest** auth (lighttpd)
+- **Vnish/Anthill support**:
+  - devices are detected from the web UI HTML meta (`AnthillOS`)
+  - enrichment uses best-effort `/api/*` probing (cookie/session login) and extracts model/hashrate/uptime/fans/temps when JSON API exists
 - **Clean shutdown**: Exit button frees ports and stops embedded NATS/scans
 
 ### Run (Windows / PowerShell)

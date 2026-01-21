@@ -24,11 +24,9 @@ Core principles:
 - Publishes commands/events to NATS
 
 ### MikroTik Service
-- Integrates with RouterOS API
-- Uses DHCP + ARP tables
-- Performs auto-discovery of ASIC devices
-- Derives online/offline state at network level
-- Publishes network-related events to NATS
+- Optional (build-tagged) integration with RouterOS API
+- Kept for future: DHCP/ARP driven discovery and network-level health
+- Not required for the single-binary core workflow
 
 ### Collector
 - Stateless worker service
@@ -80,6 +78,10 @@ Main UI → **Devices** provides:
 - **Scan discovery**: scan all enabled pools
 - **Stop scans**: stop all running scans
 - Global progress + per-pool progress
+
+Device enrichment (best-effort):
+- **Stock Antminer**: `/cgi-bin/*` JSON endpoints using **Basic + Digest** auth
+- **Vnish/Anthill**: UI often serves SPA HTML; MonA detects `AnthillOS` via HTML meta and then tries `/api/*` JSON endpoints (cookie/session)
 
 ---
 
