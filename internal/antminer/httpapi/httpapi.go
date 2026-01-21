@@ -96,6 +96,7 @@ func ProbeAntminerSchemes(ctx context.Context, host string, creds []Cred, scheme
 			req.Close = true
 			req.Header.Set("Connection", "close")
 			req.Header.Set("User-Agent", "MonA/asic-control")
+			req.Header.Set("Accept", "application/json,text/plain;q=0.9,*/*;q=0.8")
 			if cred.Username != "" || cred.Password != "" {
 				req.SetBasicAuth(cred.Username, cred.Password)
 			}
@@ -113,8 +114,47 @@ func ProbeAntminerSchemes(ctx context.Context, host string, creds []Cred, scheme
 			_ = resp.Body.Close()
 			cancel()
 
-			if resp.StatusCode == 401 || resp.StatusCode == 403 {
+			if resp.StatusCode == 401 {
+				// Try Digest auth fallback (common on lighttpd) if Basic didn't work.
+				ch, ok := parseDigestChallenge(resp.Header.Get("WWW-Authenticate"))
+				if ok && cred.Username != "" {
+					// retry once with Digest
+					ctx2, cancel2 := context.WithTimeout(ctx, perReqTimeout(scheme))
+					req2, _ := http.NewRequestWithContext(ctx2, "GET", url, nil)
+					req2.Close = true
+					req2.Header.Set("Connection", "close")
+					req2.Header.Set("User-Agent", "MonA/asic-control")
+					req2.Header.Set("Accept", "application/json,text/plain;q=0.9,*/*;q=0.8")
+					req2.Header.Set("Authorization", buildDigestAuth(cred.Username, cred.Password, "GET", p, ch))
+					resp2, err := client.Do(req2)
+					cancel2()
+					if err == nil {
+						b2, _ := io.ReadAll(io.LimitReader(resp2.Body, 256*1024))
+						_ = resp2.Body.Close()
+						body2 := strings.TrimSpace(string(b2))
+						if resp2.StatusCode >= 200 && resp2.StatusCode <= 299 && body2 != "" {
+							low2 := strings.ToLower(body2)
+							if !(strings.HasPrefix(low2, "<!doctype html") || strings.HasPrefix(low2, "<html")) {
+								var m2 any
+								sb2 := sanitize(b2)
+								if json.Unmarshal(sb2, &m2) == nil {
+									okAny = true
+									out.Responses[p] = m2
+									if len(body2) > 4096 {
+										body2 = body2[:4096] + "…"
+									}
+									out.Raw[p] = body2
+									continue
+								}
+							}
+						}
+					}
+				}
 				lastErr = "unauthorized"
+				continue
+			}
+			if resp.StatusCode == 403 {
+				lastErr = "forbidden"
 				continue
 			}
 			if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -127,12 +167,26 @@ func ProbeAntminerSchemes(ctx context.Context, host string, creds []Cred, scheme
 				continue
 			}
 
-			okAny = true
+			low := strings.ToLower(body)
+			if strings.HasPrefix(low, "<!doctype html") || strings.HasPrefix(low, "<html") {
+				// Many Vnish/Anthill firmwares return SPA HTML here (not JSON API).
+				// Treat as failure to avoid false "ok".
+				lastErr = "html response (no json api)"
+				if len(body) > 4096 {
+					body = body[:4096] + "…"
+				}
+				out.Raw[p] = body
+				continue
+			}
+
 			var m any
 			sb := sanitize(b)
 			if json.Unmarshal(sb, &m) == nil {
+				okAny = true
 				out.Responses[p] = m
 			} else {
+				// Not JSON, keep raw for debugging but do not count as OK.
+				lastErr = "non-json response"
 				out.Responses[p] = body
 			}
 			if len(body) > 4096 {

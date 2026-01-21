@@ -175,7 +175,13 @@ func (s *Scanner) probeIP(ctx context.Context, ip net.IP) Result {
 
 	open := make([]int, 0, len(s.cfg.Ports))
 	for _, p := range s.cfg.Ports {
-		if tcpOpen(ctx, host, p, s.cfg.DialTimeout) {
+		ok := tcpOpen(ctx, host, p, s.cfg.DialTimeout)
+		// Retry critical ports once (ASIC web/cgminer are sometimes slow to accept).
+		if !ok && (p == 80 || p == 443 || p == 4028) {
+			time.Sleep(25 * time.Millisecond)
+			ok = tcpOpen(ctx, host, p, s.cfg.DialTimeout*2)
+		}
+		if ok {
 			open = append(open, p)
 		}
 	}
@@ -309,6 +315,12 @@ func (s *Scanner) fingerprintHTTP(ctx context.Context, r *Result, url string) {
 	switch {
 	case strings.Contains(body, "antminer"):
 		r.Vendor = "antminer"
+	case strings.Contains(body, `meta name="firmware"`) && strings.Contains(body, "anthillos"):
+		// Vnish/AnthillOS web UI (SPA). It's still an Antminer-class device.
+		r.Vendor = "antminer"
+		if r.Firmware == "" {
+			r.Firmware = "AnthillOS"
+		}
 	case strings.Contains(body, "whatsminer"):
 		r.Vendor = "whatsminer"
 	case strings.Contains(body, "avalon") || strings.Contains(body, "canaan"):
@@ -408,6 +420,7 @@ func (s *Scanner) fingerprintCGMiner(ctx context.Context, r *Result, host string
 		if json.Unmarshal([]byte(statsRaw), &sr) == nil && len(sr.STATS) > 0 {
 			fans := map[int]int{}
 			temps := map[int]float64{}
+			chip := ""
 			for _, m := range sr.STATS {
 				// firmware / version keys differ a lot
 				if r.Firmware == "" {
@@ -421,10 +434,20 @@ func (s *Scanner) fingerprintCGMiner(ctx context.Context, r *Result, host string
 					}
 				}
 				if r.Model == "" {
-					for _, k := range []string{"Type", "Model", "Product"} {
+					for _, k := range []string{"Type", "Model", "Product", "Miner Type", "miner_type", "Device Model"} {
 						if v, ok := m[k]; ok {
 							if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
 								r.Model = s
+								break
+							}
+						}
+					}
+				}
+				if chip == "" {
+					for _, k := range []string{"Chip Type", "ChipType", "ASIC", "asic"} {
+						if v, ok := m[k]; ok {
+							if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+								chip = strings.ToUpper(strings.TrimSpace(s))
 								break
 							}
 						}
@@ -455,6 +478,21 @@ func (s *Scanner) fingerprintCGMiner(ctx context.Context, r *Result, host string
 							}
 						}
 					}
+				}
+			}
+
+			// chip-type fallback mapping (best-effort)
+			if (strings.TrimSpace(strings.ToUpper(r.Model)) == "SOC" || strings.Contains(strings.ToUpper(r.Model), " SOC")) && chip != "" {
+				switch {
+				case strings.Contains(chip, "BM1370"):
+					// S21 family. Rough differentiation by observed hashrate.
+					if r.HashrateTHS >= 215 {
+						r.Model = "S21 Pro"
+					} else {
+						r.Model = "S21"
+					}
+				case strings.Contains(chip, "BM1397"):
+					r.Model = "S19"
 				}
 			}
 
@@ -522,6 +560,10 @@ func (s *Scanner) score(r *Result) int {
 	if r.Vendor != "" && r.Vendor != "asic" {
 		score += 40
 	} else if r.Vendor == "asic" {
+		score += 15
+	}
+	// If we strongly identified Bitmain/Antminer via HTTP, allow ASIC classification even without 4028 open.
+	if r.Vendor == "antminer" && (hasPort(r.Open, 80) || hasPort(r.Open, 443)) {
 		score += 15
 	}
 	if hasPort(r.Open, 4028) {

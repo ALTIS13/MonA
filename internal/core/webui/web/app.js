@@ -24,6 +24,7 @@ const state = {
   model: "all",
   dashRefreshMs: 10000,
   lastDashSampleTs: 0,
+  lastDashDrawTs: 0,
 };
 
 function fmtTs(iso) {
@@ -355,20 +356,23 @@ function renderDevices(devices) {
 
       tr.innerHTML = `
         <td><span class="status"><span class="dot ${dotCls}"></span>${status}</span></td>
-        <td>${d.ip || ""}</td>
+        <td><a class="iplink" href="/ui/open/${encodeURIComponent(d.ip || "")}" target="_blank" rel="noreferrer">${d.ip || ""}</a></td>
         <td>${d.mac || ""}</td>
-        <td>${d.vendor || ""}</td>
         <td>${d.model || ""}</td>
+        <td>${fmtTHS(d.hashrate_ths)}</td>
         <td>${d.worker || ""}</td>
         <td>${authHTML}</td>
         <td>${fmtUptime(d.uptime_s)}</td>
-        <td>${fmtTHS(d.hashrate_ths)}</td>
         <td>${fansHTML}</td>
         <td>${fmtTs(d.first_seen)}</td>
         <td>${fmtTs(d.last_seen)}</td>
       `;
       tr.style.cursor = "pointer";
       tr.addEventListener("click", () => openDevice(d.ip));
+      const iplink = tr.querySelector(".iplink");
+      if (iplink) {
+        iplink.addEventListener("click", (e) => e.stopPropagation());
+      }
       // prevent row click when clicking auth dot (still opens device)
       const dot = tr.querySelector(".authdot");
       if (dot) {
@@ -637,6 +641,9 @@ function initControls() {
   }
   if ($("log_q")) $("log_q").addEventListener("input", () => renderLogs());
   if ($("dash_refresh")) {
+    // initialize from default select value
+    const initV = Number($("dash_refresh").value || 10000);
+    state.dashRefreshMs = initV > 0 ? initV : 10000;
     $("dash_refresh").addEventListener("change", (e) => {
       const v = Number(e.target.value || 10000);
       state.dashRefreshMs = v > 0 ? v : 10000;

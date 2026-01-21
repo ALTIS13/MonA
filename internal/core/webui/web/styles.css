@@ -121,6 +121,24 @@ body::before{
 body.sb-collapsed .sidebar{width: 70px}
 body.sb-collapsed .sb-item span:last-child{display:none}
 body.sb-collapsed .sb-sub{display:none}
+body.sb-collapsed .sb-head{align-items:center}
+body.sb-collapsed .logo{
+  width: 44px;
+  padding: 8px 0;
+  text-align:center;
+  overflow:hidden;
+}
+body.sb-collapsed .sb-ico{margin: 0 auto}
+body.sb-collapsed .sb-item{justify-content:center; padding: 10px 8px}
+body.sb-collapsed .sb-foot{display:flex; justify-content:center}
+body.sb-collapsed .sb-foot .pill{
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  text-indent: -9999px;
+  overflow:hidden;
+  border-radius: 999px;
+}
 
 /* --- Topbar --- */
 .topbar{
@@ -546,6 +564,15 @@ tr:hover td{background: rgba(255,255,255,0.03)}
 .fanbar.bad .fanfill{background: rgba(251,113,133,0.90)}
 
 .hidden{display:none}
+
+.iplink{
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: rgba(255,255,255,0.25);
+}
+.iplink:hover{
+  text-decoration-color: rgba(255,255,255,0.55);
+}
 
 /* --- Progress --- */
 .pbar{

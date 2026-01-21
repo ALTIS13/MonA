@@ -44,7 +44,15 @@ func Normalize(raw string) Normalized {
 		n.Vendor = "whatsminer"
 	case strings.HasPrefix(up, "A") && len(up) >= 3 && up[1] >= '0' && up[1] <= '9':
 		n.Vendor = "avalonminer"
-	case strings.HasPrefix(up, "KS") || strings.HasPrefix(up, "AL") || strings.HasPrefix(up, "KA"):
+	case strings.HasPrefix(up, "KS"):
+		// KS* is ambiguous (IceRiver KS* vs Bitmain Antminer KS*).
+		// If we saw explicit Antminer context elsewhere, treat as Antminer.
+		if sawAntminer {
+			n.Vendor = "antminer"
+		} else {
+			n.Vendor = "iceriver"
+		}
+	case strings.HasPrefix(up, "AL") || strings.HasPrefix(up, "KA"):
 		// IceRiver common families: KS*, AL*, KA*
 		n.Vendor = "iceriver"
 	case strings.HasPrefix(up, "L") || strings.HasPrefix(up, "S"):

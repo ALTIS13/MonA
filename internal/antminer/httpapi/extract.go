@@ -21,6 +21,26 @@ type Facts struct {
 func ExtractFacts(res ProbeResult) Facts {
 	var f Facts
 
+	// Antminer stock JSON often includes INFO.type in summary/stats.
+	if anyv, ok := res.Responses["/cgi-bin/summary.cgi"]; ok {
+		if m, ok := anyv.(map[string]any); ok {
+			if info, ok := m["INFO"].(map[string]any); ok && f.Model == "" {
+				if t, ok := info["type"].(string); ok && strings.TrimSpace(t) != "" {
+					f.Model = strings.TrimSpace(t)
+				}
+			}
+		}
+	}
+	if anyv, ok := res.Responses["/cgi-bin/stats.cgi"]; ok {
+		if m, ok := anyv.(map[string]any); ok {
+			if info, ok := m["INFO"].(map[string]any); ok && f.Model == "" {
+				if t, ok := info["type"].(string); ok && strings.TrimSpace(t) != "" {
+					f.Model = strings.TrimSpace(t)
+				}
+			}
+		}
+	}
+
 	// get_system_info.cgi is usually the most reliable for model/fw/mac.
 	if anyv, ok := res.Responses["/cgi-bin/get_system_info.cgi"]; ok {
 		if m, ok := anyv.(map[string]any); ok {
@@ -39,6 +59,8 @@ func ExtractFacts(res ProbeResult) Facts {
 			raw += " " + strings.ToUpper(v)
 		}
 		switch {
+		case strings.Contains(raw, "S21 PRO"):
+			f.Model = "Antminer S21 Pro"
 		case strings.Contains(raw, " S21"):
 			f.Model = "Antminer S21"
 		case strings.Contains(raw, " S19"):
@@ -67,7 +89,23 @@ func ExtractFacts(res ProbeResult) Facts {
 			}
 			if f.HashrateTHS == 0 {
 				// common units: GHS or MHS
-				if v, ok := sumObj["GHS 5s"]; ok {
+				// stock newer firmwares: rate_5s + rate_unit (GH/s)
+				if v, ok := sumObj["rate_5s"]; ok {
+					unit := ""
+					if u, ok := sumObj["rate_unit"].(string); ok {
+						unit = strings.ToLower(strings.TrimSpace(u))
+					}
+					x := toF64(v)
+					switch {
+					case strings.Contains(unit, "gh"):
+						f.HashrateTHS = x / 1000.0
+					case strings.Contains(unit, "th"):
+						f.HashrateTHS = x
+					default:
+						// assume GH/s by default for this field
+						f.HashrateTHS = x / 1000.0
+					}
+				} else if v, ok := sumObj["GHS 5s"]; ok {
 					f.HashrateTHS = toF64(v) / 1e3
 				} else if v, ok := sumObj["GHS av"]; ok {
 					f.HashrateTHS = toF64(v) / 1e3
@@ -103,6 +141,34 @@ func ExtractFacts(res ProbeResult) Facts {
 			fans := map[int]int{}
 			temps := map[int]float64{}
 			for _, sm := range statMaps {
+				// newer firmwares: fan: [..]
+				if fv, ok := sm["fan"]; ok {
+					if arr, ok := fv.([]any); ok {
+						for i, x := range arr {
+							fans[i+1] = int(toU64(x))
+						}
+					}
+				}
+				// temps nested per chain: temp_chip/temp_pcb arrays
+				if ch, ok := sm["chain"].([]any); ok {
+					for _, cx := range ch {
+						cm, ok := cx.(map[string]any)
+						if !ok {
+							continue
+						}
+						maxChip := 0.0
+						if tc, ok := cm["temp_chip"].([]any); ok {
+							for _, t := range tc {
+								if v := toF64(t); v > maxChip {
+									maxChip = v
+								}
+							}
+						}
+						if maxChip > 0 {
+							temps[len(temps)+1] = maxChip
+						}
+					}
+				}
 				for k, v := range sm {
 					kl := strings.ToLower(strings.TrimSpace(k))
 					if strings.HasPrefix(kl, "fan") {

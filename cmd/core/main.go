@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -35,8 +36,17 @@ import (
 	"asic-control/internal/netutil"
 	"asic-control/internal/secrets"
 	"asic-control/internal/settings"
+	vnishhttp "asic-control/internal/vnish/httpapi"
 	"asic-control/internal/version"
 )
+
+func urlUserPass(user, pass string) string {
+	// URL-encode to avoid breaking the redirect URL.
+	if pass == "" {
+		return url.PathEscape(user)
+	}
+	return url.PathEscape(user) + ":" + url.PathEscape(pass)
+}
 
 func main() {
 	log, err := logging.New(logging.Config{Level: "info"})
@@ -138,10 +148,16 @@ func main() {
 		cfg := cfgStore.Get()
 		type cand struct {
 			pri  int
+			fw   string
 			cred httpapi.Cred
 		}
 		var cands []cand
 		dv := strings.ToLower(strings.TrimSpace(d.Vendor))
+		devFW := strings.ToLower(strings.TrimSpace(d.Firmware))
+		devClass := "stock"
+		if strings.Contains(devFW, "vnish") || strings.Contains(devFW, "anthill") || strings.Contains(devFW, "brains") {
+			devClass = "vnish"
+		}
 		for _, c := range cfg.Credentials {
 			if !c.Enabled {
 				continue
@@ -160,6 +176,7 @@ func main() {
 			}
 			cands = append(cands, cand{
 				pri: c.Priority,
+				fw:  strings.ToLower(strings.TrimSpace(c.Firmware)),
 				cred: httpapi.Cred{
 					Name:     c.Name,
 					Username: user,
@@ -167,17 +184,41 @@ func main() {
 				},
 			})
 		}
+		// Sort by (firmware match) then priority.
 		for i := 0; i < len(cands); i++ {
 			for j := i + 1; j < len(cands); j++ {
-				if cands[j].pri > cands[i].pri {
+				si := 0
+				sj := 0
+				if cands[i].fw != "" && cands[i].fw == devClass {
+					si += 1000
+				}
+				if cands[j].fw != "" && cands[j].fw == devClass {
+					sj += 1000
+				}
+				si += cands[i].pri
+				sj += cands[j].pri
+				if sj > si {
 					cands[i], cands[j] = cands[j], cands[i]
 				}
 			}
 		}
-		out := make([]httpapi.Cred, 0, len(cands)+8)
+
+		out := make([]httpapi.Cred, 0, len(cands)+10)
+
+		// btcTools-like: for stock antminer, try known stock pairs first (before custom)
+		// to reduce operator friction. Only when device does NOT look like vnish.
+		if devClass == "stock" && (dv == "" || dv == "antminer" || dv == "asic" || dv == "unknown") {
+			out = append(out,
+				httpapi.Cred{Name: "stock:root/root", Username: "root", Password: "root"},
+				httpapi.Cred{Name: "stock:root/admin", Username: "root", Password: "admin"},
+			)
+		}
+
 		for _, x := range cands {
 			out = append(out, x.cred)
 		}
+
+		// Optionally, built-in defaults list (currently empty unless you re-add it later)
 		if cfg.TryDefaultCreds {
 			for _, dc := range defaultcreds.Defaults() {
 				if dc.Vendor != "generic" && dc.Vendor != dv {
@@ -186,8 +227,17 @@ func main() {
 				out = append(out, httpapi.Cred{Name: "default:" + dc.Vendor, Username: dc.Username, Password: dc.Password})
 			}
 		}
+
 		if len(out) == 0 {
 			out = append(out, httpapi.Cred{Name: "no-auth"})
+		}
+		return out
+	}
+
+	toVnishCreds := func(in []httpapi.Cred) []vnishhttp.Cred {
+		out := make([]vnishhttp.Cred, 0, len(in))
+		for _, c := range in {
+			out = append(out, vnishhttp.Cred{Name: c.Name, Username: c.Username, Password: c.Password})
 		}
 		return out
 	}
@@ -211,7 +261,7 @@ func main() {
 			dd.AuthUpdated = time.Now().UTC()
 			dd.AuthError = ""
 		})
-		// antminer first
+		// antminer first (stock JSON CGI) but if device looks like vnish/anthill, try vnish probe.
 		v := strings.ToLower(strings.TrimSpace(d.Vendor))
 		if v != "antminer" && v != "asic" && v != "" && v != "unknown" {
 			store.UpdateEnrichment(ip, func(dd *registry.Device) {
@@ -244,6 +294,8 @@ func main() {
 		if has443 {
 			schemes = append(schemes, "https")
 		}
+
+		isAnthill := strings.Contains(strings.ToLower(d.Firmware), "anthill")
 
 		res := httpapi.ProbeAntminerSchemes(ctx, ip, creds, schemes)
 		if res.OK {
@@ -301,6 +353,49 @@ func main() {
 				}
 			})
 		} else {
+			// If CGI is not JSON API (e.g. Anthill/Vnish SPA), try vnish/anthill API probe.
+			if isAnthill || strings.Contains(strings.ToLower(res.Error), "html response") || strings.Contains(strings.ToLower(d.Firmware), "vnish") {
+				vres := vnishhttp.Probe(ctx, ip, toVnishCreds(creds), schemes)
+				if vres.OK {
+					f := vnishhttp.ExtractFacts(vres)
+					store.UpdateEnrichment(ip, func(dd *registry.Device) {
+						dd.AuthStatus = "ok"
+						dd.AuthUpdated = time.Now().UTC()
+						dd.AuthCredName = vres.UsedCred
+						dd.AuthError = ""
+						if dd.Vendor == "" || dd.Vendor == "unknown" || dd.Vendor == "asic" {
+							dd.Vendor = "antminer"
+						}
+						if f.Model != "" {
+							n := modelnorm.Normalize(f.Model)
+							if n.Model != "" {
+								dd.Model = n.Model
+							} else {
+								dd.Model = f.Model
+							}
+						}
+						if f.Firmware != "" {
+							dd.Firmware = f.Firmware
+						}
+						if f.Worker != "" {
+							dd.Worker = f.Worker
+						}
+						if f.UptimeS > 0 {
+							dd.UptimeS = f.UptimeS
+						}
+						if f.HashrateTHS > 0 {
+							dd.HashrateTHS = f.HashrateTHS
+						}
+						if len(f.FansRPM) > 0 {
+							dd.FansRPM = f.FansRPM
+						}
+						if len(f.TempsC) > 0 {
+							dd.TempsC = f.TempsC
+						}
+					})
+					return httpapi.ProbeResult{OK: true, Scheme: vres.Scheme, UsedCred: vres.UsedCred, Error: "", Responses: map[string]any{"vnish": vres.Responses}}
+				}
+			}
 			store.UpdateEnrichment(ip, func(dd *registry.Device) {
 				dd.AuthStatus = "fail"
 				dd.AuthUpdated = time.Now().UTC()
@@ -658,6 +753,63 @@ func main() {
 		res := runProbe(ctx, ip)
 		w.Header().Set("content-type", "application/json")
 		_ = json.NewEncoder(w).Encode(res)
+	})
+
+	// Open miner UI with auto-login (best-effort).
+	// Uses the last successful credential for the device (AuthStatus==ok).
+	// For BasicAuth targets, redirects to http://user:pass@ip/.
+	// NOTE: some modern browsers may restrict credential-in-URL, but many farm setups still allow it.
+	r.Get("/ui/open/{ip}", func(w http.ResponseWriter, r *http.Request) {
+		ip := strings.TrimSpace(chi.URLParam(r, "ip"))
+		d, ok := store.Get(ip)
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if !d.Online {
+			http.Redirect(w, r, "http://"+ip+"/", http.StatusFound)
+			return
+		}
+		if strings.ToLower(d.AuthStatus) != "ok" || strings.TrimSpace(d.AuthCredName) == "" {
+			http.Redirect(w, r, "http://"+ip+"/", http.StatusFound)
+			return
+		}
+
+		user := ""
+		pass := ""
+		name := d.AuthCredName
+
+		// stock pairs
+		if strings.HasPrefix(name, "stock:") {
+			// stock:root/root
+			rest := strings.TrimPrefix(name, "stock:")
+			parts := strings.Split(rest, "/")
+			if len(parts) == 2 {
+				user, pass = parts[0], parts[1]
+			}
+		} else {
+			cfg := cfgStore.Get()
+			for _, c := range cfg.Credentials {
+				if !c.Enabled {
+					continue
+				}
+				if c.Name != name {
+					continue
+				}
+				u, err1 := sec.DecryptString(c.UsernameEnc)
+				p, err2 := sec.DecryptString(c.PasswordEnc)
+				if err1 == nil && err2 == nil {
+					user, pass = u, p
+					break
+				}
+			}
+		}
+
+		if user == "" {
+			http.Redirect(w, r, "http://"+ip+"/", http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, "http://"+urlUserPass(user, pass)+"@"+ip+"/", http.StatusFound)
 	})
 
 	// Settings
