@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"github.com/jhump/protoreflect/dynamic"
 	"go.uber.org/zap"
 
+	"asic-control/internal/antminer/httpapi"
 	"asic-control/internal/bus/embeddednats"
 	"asic-control/internal/bus/natsjs"
 	"asic-control/internal/core/registry"
@@ -29,7 +31,9 @@ import (
 	"asic-control/internal/discovery/subnets"
 	"asic-control/internal/events"
 	"asic-control/internal/logging"
+	"asic-control/internal/modelnorm"
 	"asic-control/internal/netutil"
+	"asic-control/internal/secrets"
 	"asic-control/internal/settings"
 	"asic-control/internal/version"
 )
@@ -39,6 +43,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	startedAt := time.Now()
 	defer func() { _ = log.Sync() }()
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -47,6 +52,10 @@ func main() {
 	cfgStore, err := settings.Open("data")
 	if err != nil {
 		log.Fatal("settings open", zap.Error(err))
+	}
+	sec, err := secrets.Open("data")
+	if err != nil {
+		log.Fatal("secrets open", zap.Error(err))
 	}
 	cfg := cfgStore.Get()
 
@@ -89,6 +98,262 @@ func main() {
 
 	store := registry.NewStore()
 	subnetsStore := subnets.NewStore()
+
+	// Auto enrichment (HTTP deep probe) worker pool.
+	// Goal: devices should populate details automatically without manual clicks.
+	type probeReq struct {
+		IP     string
+		Reason string
+	}
+	probeCh := make(chan probeReq, 8192)
+	var probeMu sync.Mutex
+	probeNext := map[string]time.Time{} // ip -> next allowed probe time (backoff)
+
+	enqueueProbe := func(ip, reason string, minInterval time.Duration) {
+		if ip == "" {
+			return
+		}
+		if minInterval <= 0 {
+			minInterval = 30 * time.Second
+		}
+		now := time.Now()
+		probeMu.Lock()
+		next := probeNext[ip]
+		if now.Before(next) {
+			probeMu.Unlock()
+			return
+		}
+		probeNext[ip] = now.Add(minInterval)
+		probeMu.Unlock()
+		select {
+		case probeCh <- probeReq{IP: ip, Reason: reason}:
+		default:
+			// drop if saturated (will retry on ticker)
+		}
+	}
+
+	// Build credential candidates for a device. Tries all enabled creds first (priority desc),
+	// then optionally defaults (Settings.TryDefaultCreds).
+	buildCreds := func(d *registry.Device) []httpapi.Cred {
+		cfg := cfgStore.Get()
+		type cand struct {
+			pri  int
+			cred httpapi.Cred
+		}
+		var cands []cand
+		dv := strings.ToLower(strings.TrimSpace(d.Vendor))
+		for _, c := range cfg.Credentials {
+			if !c.Enabled {
+				continue
+			}
+			cv := strings.ToLower(strings.TrimSpace(c.Vendor))
+			if dv != "" && dv != "unknown" && dv != "asic" && cv != "" && cv != dv {
+				continue
+			}
+			user, err := sec.DecryptString(c.UsernameEnc)
+			if err != nil {
+				continue
+			}
+			pass, err := sec.DecryptString(c.PasswordEnc)
+			if err != nil {
+				continue
+			}
+			cands = append(cands, cand{
+				pri: c.Priority,
+				cred: httpapi.Cred{
+					Name:     c.Name,
+					Username: user,
+					Password: pass,
+				},
+			})
+		}
+		for i := 0; i < len(cands); i++ {
+			for j := i + 1; j < len(cands); j++ {
+				if cands[j].pri > cands[i].pri {
+					cands[i], cands[j] = cands[j], cands[i]
+				}
+			}
+		}
+		out := make([]httpapi.Cred, 0, len(cands)+8)
+		for _, x := range cands {
+			out = append(out, x.cred)
+		}
+		if cfg.TryDefaultCreds {
+			for _, dc := range defaultcreds.Defaults() {
+				if dc.Vendor != "generic" && dc.Vendor != dv {
+					continue
+				}
+				out = append(out, httpapi.Cred{Name: "default:" + dc.Vendor, Username: dc.Username, Password: dc.Password})
+			}
+		}
+		if len(out) == 0 {
+			out = append(out, httpapi.Cred{Name: "no-auth"})
+		}
+		return out
+	}
+
+	runProbe := func(ctx context.Context, ip string) httpapi.ProbeResult {
+		d, ok := store.Get(ip)
+		if !ok {
+			return httpapi.ProbeResult{OK: false, Error: "not found"}
+		}
+		if !d.Online {
+			store.UpdateEnrichment(ip, func(dd *registry.Device) {
+				dd.AuthStatus = "fail"
+				dd.AuthUpdated = time.Now().UTC()
+				dd.AuthError = "offline"
+			})
+			return httpapi.ProbeResult{OK: false, Error: "offline"}
+		}
+		// mark trying (minimal UI indicator)
+		store.UpdateEnrichment(ip, func(dd *registry.Device) {
+			dd.AuthStatus = "trying"
+			dd.AuthUpdated = time.Now().UTC()
+			dd.AuthError = ""
+		})
+		// antminer first
+		v := strings.ToLower(strings.TrimSpace(d.Vendor))
+		if v != "antminer" && v != "asic" && v != "" && v != "unknown" {
+			store.UpdateEnrichment(ip, func(dd *registry.Device) {
+				dd.AuthStatus = "fail"
+				dd.AuthUpdated = time.Now().UTC()
+				dd.AuthError = "unsupported vendor"
+			})
+			return httpapi.ProbeResult{OK: false, Error: "unsupported vendor (antminer first)"}
+		}
+		creds := buildCreds(d)
+		// btcTools-like: only try https if 443 is actually open (avoid hanging TLS on ASICs).
+		schemes := []string{}
+		for _, p := range d.OpenPorts {
+			if p == 80 {
+				schemes = append(schemes, "http")
+				break
+			}
+		}
+		has443 := false
+		for _, p := range d.OpenPorts {
+			if p == 443 {
+				has443 = true
+				break
+			}
+		}
+		if len(schemes) == 0 {
+			// If we didn't probe ports (or only https farms), default to http first (fast fail).
+			schemes = []string{"http"}
+		}
+		if has443 {
+			schemes = append(schemes, "https")
+		}
+
+		res := httpapi.ProbeAntminerSchemes(ctx, ip, creds, schemes)
+		if res.OK {
+			facts := httpapi.ExtractFacts(res)
+			// If we authenticated but still extracted nothing useful, mark FAIL (so operator can click in).
+			if facts.MAC == "" && facts.Worker == "" && facts.Firmware == "" && facts.Model == "" && facts.HashrateTHS == 0 && facts.UptimeS == 0 && len(facts.FansRPM) == 0 && len(facts.TempsC) == 0 {
+				store.UpdateEnrichment(ip, func(dd *registry.Device) {
+					dd.AuthStatus = "fail"
+					dd.AuthUpdated = time.Now().UTC()
+					dd.AuthCredName = res.UsedCred
+					dd.AuthError = "ok but no parsable data"
+				})
+				return res
+			}
+
+			store.UpdateEnrichment(ip, func(dd *registry.Device) {
+				dd.AuthStatus = "ok"
+				dd.AuthUpdated = time.Now().UTC()
+				dd.AuthCredName = res.UsedCred
+				dd.AuthError = ""
+				if dd.Vendor == "" || dd.Vendor == "unknown" || dd.Vendor == "asic" {
+					dd.Vendor = "antminer"
+				}
+				if dd.MAC == "" && facts.MAC != "" {
+					dd.MAC = facts.MAC
+				}
+				if facts.Model != "" {
+					n := modelnorm.Normalize(facts.Model)
+					if n.Model != "" {
+						dd.Model = n.Model
+						if (dd.Vendor == "" || dd.Vendor == "unknown" || dd.Vendor == "asic") && n.Vendor != "unknown" {
+							dd.Vendor = n.Vendor
+						}
+					} else {
+						dd.Model = facts.Model
+					}
+				}
+				if facts.Firmware != "" {
+					dd.Firmware = facts.Firmware
+				}
+				if facts.Worker != "" {
+					dd.Worker = facts.Worker
+				}
+				if facts.UptimeS > 0 {
+					dd.UptimeS = facts.UptimeS
+				}
+				if facts.HashrateTHS > 0 {
+					dd.HashrateTHS = facts.HashrateTHS
+				}
+				if len(facts.FansRPM) > 0 {
+					dd.FansRPM = facts.FansRPM
+				}
+				if len(facts.TempsC) > 0 {
+					dd.TempsC = facts.TempsC
+				}
+			})
+		} else {
+			store.UpdateEnrichment(ip, func(dd *registry.Device) {
+				dd.AuthStatus = "fail"
+				dd.AuthUpdated = time.Now().UTC()
+				dd.AuthCredName = res.UsedCred
+				dd.AuthError = res.Error
+			})
+		}
+		return res
+	}
+
+	// workers
+	workers := 16
+	for i := 0; i < workers; i++ {
+		go func() {
+			for {
+				select {
+				case <-rootCtx.Done():
+					return
+				case req := <-probeCh:
+					ctx, cancel := context.WithTimeout(rootCtx, 5*time.Second)
+					_ = runProbe(ctx, req.IP)
+					cancel()
+				}
+			}
+		}()
+	}
+
+	// periodic retry: pick devices that are online and missing key fields.
+	go func() {
+		t := time.NewTicker(12 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-rootCtx.Done():
+				return
+			case <-t.C:
+				for _, d := range store.List() {
+					// only re-probe if likely needed
+					if !d.Online {
+						continue
+					}
+					if strings.ToLower(d.Vendor) != "antminer" && strings.ToLower(d.Vendor) != "asic" && d.Vendor != "" {
+						continue
+					}
+					need := d.MAC == "" || d.Worker == "" || d.Firmware == "" || len(d.FansRPM) == 0
+					if !need {
+						continue
+					}
+					enqueueProbe(d.IP, "tick", 60*time.Second)
+				}
+			}
+		}
+	}()
 
 	// restore persisted subnets
 	for _, sn := range cfg.Subnets {
@@ -153,11 +418,15 @@ func main() {
 					d.Worker = res.Worker
 					d.UptimeS = res.UptimeS
 					d.HashrateTHS = res.HashrateTHS
+					d.FansRPM = res.FansRPM
+					d.TempsC = res.TempsC
 				})
 
 				if !res.IsASIC {
 					return
 				}
+				// Auto-enrich immediately after discovery (low frequency; worker pool handles backoff).
+				enqueueProbe(ip, "scan", 15*time.Second)
 				if !natsConnected.Load() {
 					return
 				}
@@ -363,11 +632,32 @@ func main() {
 			"nats_connected": natsConnected.Load(),
 			"nats_error":     errStr,
 			"embedded_nats":  embOn,
+			"started_at":     startedAt.Format(time.RFC3339),
+			"uptime_s":       int64(time.Since(startedAt).Seconds()),
 		})
 	})
 	r.Get("/api/devices", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		_ = json.NewEncoder(w).Encode(store.List())
+	})
+
+	// Device details (light) + deep probe (Antminer first)
+	r.Get("/api/devices/{ip}", func(w http.ResponseWriter, r *http.Request) {
+		ip := strings.TrimSpace(chi.URLParam(r, "ip"))
+		w.Header().Set("content-type", "application/json")
+		if d, ok := store.Get(ip); ok {
+			_ = json.NewEncoder(w).Encode(d)
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	})
+	r.Post("/api/devices/{ip}/probe", func(w http.ResponseWriter, r *http.Request) {
+		ip := strings.TrimSpace(chi.URLParam(r, "ip"))
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		res := runProbe(ctx, ip)
+		w.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(w).Encode(res)
 	})
 
 	// Settings
@@ -381,6 +671,9 @@ func main() {
 			http.Error(w, "bad json", http.StatusBadRequest)
 			return
 		}
+		// Settings UI does not edit credentials; never allow wiping them.
+		prev := cfgStore.Get()
+		s.Credentials = prev.Credentials
 		// basic normalization/defaults
 		if s.Version == 0 {
 			s.Version = 1
@@ -472,6 +765,168 @@ func main() {
 	r.Get("/api/creds/defaults", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		_ = json.NewEncoder(w).Encode(defaultcreds.Defaults())
+	})
+
+	// Credentials (stored encrypted in settings.json; secrets in data/secret.key)
+	type credPublic struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Vendor   string `json:"vendor"`
+		Firmware string `json:"firmware,omitempty"`
+		Enabled  bool   `json:"enabled"`
+		Priority int    `json:"priority"`
+		Note     string `json:"note,omitempty"`
+	}
+	newID := func() string {
+		var b [8]byte
+		_, _ = rand.Read(b[:])
+		return fmt.Sprintf("%x", b[:])
+	}
+	r.Get("/api/creds", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		cfg := cfgStore.Get()
+		out := make([]credPublic, 0, len(cfg.Credentials))
+		for _, c := range cfg.Credentials {
+			out = append(out, credPublic{
+				ID:       c.ID,
+				Name:     c.Name,
+				Vendor:   c.Vendor,
+				Firmware: c.Firmware,
+				Enabled:  c.Enabled,
+				Priority: c.Priority,
+				Note:     c.Note,
+			})
+		}
+		_ = json.NewEncoder(w).Encode(out)
+	})
+	r.Post("/api/creds", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Name     string `json:"name"`
+			Vendor   string `json:"vendor"`
+			Firmware string `json:"firmware"`
+			Enabled  bool   `json:"enabled"`
+			Priority int    `json:"priority"`
+			Note     string `json:"note"`
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		req.Name = strings.TrimSpace(req.Name)
+		req.Vendor = strings.TrimSpace(strings.ToLower(req.Vendor))
+		req.Firmware = strings.TrimSpace(strings.ToLower(req.Firmware))
+		if req.Name == "" || req.Vendor == "" {
+			http.Error(w, "name and vendor required", http.StatusBadRequest)
+			return
+		}
+		uEnc, err := sec.EncryptString(req.Username)
+		if err != nil {
+			http.Error(w, "encrypt username failed", http.StatusInternalServerError)
+			return
+		}
+		pEnc, err := sec.EncryptString(req.Password)
+		if err != nil {
+			http.Error(w, "encrypt password failed", http.StatusInternalServerError)
+			return
+		}
+		id := newID()
+		_ = cfgStore.Patch(func(s *settings.Settings) {
+			s.Credentials = append(s.Credentials, settings.Credential{
+				ID:          id,
+				Name:        req.Name,
+				Vendor:      req.Vendor,
+				Firmware:    req.Firmware,
+				Enabled:     req.Enabled,
+				Priority:    req.Priority,
+				Note:        req.Note,
+				UsernameEnc: uEnc,
+				PasswordEnc: pEnc,
+			})
+		})
+		w.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": id})
+	})
+	r.Patch("/api/creds/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		var req struct {
+			Name     *string `json:"name"`
+			Vendor   *string `json:"vendor"`
+			Firmware *string `json:"firmware"`
+			Enabled  *bool   `json:"enabled"`
+			Priority *int    `json:"priority"`
+			Note     *string `json:"note"`
+			Username *string `json:"username"`
+			Password *string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		var updated bool
+		_ = cfgStore.Patch(func(s *settings.Settings) {
+			for i := range s.Credentials {
+				if s.Credentials[i].ID != id {
+					continue
+				}
+				c := &s.Credentials[i]
+				if req.Name != nil {
+					c.Name = strings.TrimSpace(*req.Name)
+				}
+				if req.Vendor != nil {
+					c.Vendor = strings.TrimSpace(strings.ToLower(*req.Vendor))
+				}
+				if req.Firmware != nil {
+					c.Firmware = strings.TrimSpace(strings.ToLower(*req.Firmware))
+				}
+				if req.Enabled != nil {
+					c.Enabled = *req.Enabled
+				}
+				if req.Priority != nil {
+					c.Priority = *req.Priority
+				}
+				if req.Note != nil {
+					c.Note = *req.Note
+				}
+				if req.Username != nil && strings.TrimSpace(*req.Username) != "" {
+					if uEnc, err := sec.EncryptString(*req.Username); err == nil {
+						c.UsernameEnc = uEnc
+					}
+				}
+				if req.Password != nil && strings.TrimSpace(*req.Password) != "" {
+					if pEnc, err := sec.EncryptString(*req.Password); err == nil {
+						c.PasswordEnc = pEnc
+					}
+				}
+				updated = true
+			}
+		})
+		if !updated {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	})
+	r.Delete("/api/creds/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		var removed bool
+		_ = cfgStore.Patch(func(s *settings.Settings) {
+			out := s.Credentials[:0]
+			for _, c := range s.Credentials {
+				if c.ID == id {
+					removed = true
+					continue
+				}
+				out = append(out, c)
+			}
+			s.Credentials = out
+		})
+		if !removed {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	r.Post("/api/subnets", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

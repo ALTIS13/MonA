@@ -37,6 +37,22 @@ type Settings struct {
 
 	// Scanner probes
 	TryDefaultCreds bool `json:"try_default_creds"`
+
+	// Encrypted credentials (stored in settings.json, secrets encrypted with data/secret.key)
+	Credentials []Credential `json:"credentials,omitempty"`
+}
+
+type Credential struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Vendor   string `json:"vendor"`            // antminer/whatsminer/...
+	Firmware string `json:"firmware,omitempty"` // stock/vnish/custom/...
+	Enabled  bool   `json:"enabled"`
+	Priority int    `json:"priority"`
+	Note     string `json:"note,omitempty"`
+
+	UsernameEnc string `json:"username_enc,omitempty"`
+	PasswordEnc string `json:"password_enc,omitempty"`
 }
 
 func Defaults() Settings {
@@ -64,5 +80,7 @@ func Defaults() Settings {
 		Subnets: nil,
 
 		TryDefaultCreds: false,
+
+		Credentials: nil,
 	}
 }

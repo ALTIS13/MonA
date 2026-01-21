@@ -3,212 +3,405 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>MonA — ASIC Fleet</title>
+    <title>MonA</title>
     <link rel="stylesheet" href="/styles.css" />
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">
-        <div class="logo">MonA</div>
-        <div class="subtitle" id="ver">ASIC Fleet Monitor</div>
-      </div>
-      <div class="topbar-right">
-        <nav class="tabs">
-          <button id="tab_devices" class="tab tab-active">Devices</button>
-          <button id="tab_discovery" class="tab">Discovery</button>
-          <button id="tab_settings" class="tab">Settings</button>
-          <button id="tab_creds" class="tab">Credentials</button>
-          <button id="tab_mikrotik" class="tab" title="optional (later)">MikroTik</button>
+    <div class="shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="sb-head">
+          <div class="logo">MonA</div>
+          <div class="sb-sub" id="ver">v0</div>
+        </div>
+        <nav class="sb-nav">
+          <button class="sb-item sb-active" data-route="dashboard">
+            <span class="sb-ico">▦</span>
+            <span>Dashboard</span>
+          </button>
+          <button class="sb-item" data-route="devices">
+            <span class="sb-ico">⛏</span>
+            <span>Devices</span>
+          </button>
+          <button class="sb-item" data-route="discovery">
+            <span class="sb-ico">⌁</span>
+            <span>Discovery</span>
+          </button>
+          <button class="sb-item" data-route="creds">
+            <span class="sb-ico">🔒</span>
+            <span>Credentials</span>
+          </button>
+          <button class="sb-item" data-route="settings">
+            <span class="sb-ico">⚙</span>
+            <span>Settings</span>
+          </button>
         </nav>
-        <span id="conn" class="pill pill-warn">connecting…</span>
-      </div>
-    </header>
+        <div class="sb-foot">
+          <span id="conn" class="pill pill-warn">connecting…</span>
+        </div>
+      </aside>
 
-    <main class="container">
-      <section id="page_devices">
-        <section class="card">
-          <div class="k">Discovery control</div>
-          <div class="row">
-            <button id="scan_all" class="btn">Scan discovery</button>
-            <button id="stop_all" class="btn">Stop scans</button>
+      <main class="main">
+        <header class="topbar">
+          <button class="iconbtn" id="toggle_sidebar" title="Toggle sidebar">≡</button>
+          <div class="tb-title">
+            <div class="tb-h1" id="tb_name">Fleet</div>
+            <div class="tb-h2" id="tb_sub">—</div>
           </div>
-          <div class="row row-tight">
-            <div class="pbar"><div id="scan_bar" class="pfill" style="width:0%"></div></div>
-            <div id="scan_text" class="hint">idle</div>
+          <div class="tb-kpis">
+            <div class="mini">
+              <div class="k">Hashrate</div>
+              <div class="v" id="tb_hash">—</div>
+            </div>
+            <div class="mini">
+              <div class="k">Status</div>
+              <div class="v" id="tb_status">—</div>
+            </div>
           </div>
-          <div class="hint">Runs scan for all address pools from Discovery (enabled ones).</div>
-        </section>
+        </header>
 
-        <section class="controls">
-          <input id="q" class="input" placeholder="search ip/mac/shard…" />
-          <select id="online" class="select">
-            <option value="all">all</option>
-            <option value="online">online</option>
-            <option value="offline">offline</option>
-          </select>
-          <select id="asic" class="select">
-            <option value="asic">asic only</option>
-            <option value="all">all devices</option>
-          </select>
-          <select id="vendor" class="select">
-            <option value="all">vendor: all</option>
-          </select>
-          <select id="model" class="select">
-            <option value="all">model: all</option>
-          </select>
-          <button id="refresh" class="btn">Refresh</button>
-        </section>
+        <section class="content">
+          <!-- DASHBOARD -->
+          <section id="page_dashboard">
+            <section class="grid">
+              <div class="card kpi">
+                <div class="card-top">
+                  <div>
+                    <div class="k">Online</div>
+                    <div class="v ok"><span id="kpi_online">0</span><span class="unit"> / <span id="kpi_total">0</span></span></div>
+                  </div>
+                  <div class="ringwrap">
+                    <svg class="ring" viewBox="0 0 100 100" aria-label="online percent">
+                      <circle class="ring-bg" cx="50" cy="50" r="42"></circle>
+                      <circle class="ring-fg ok" id="ring_online" cx="50" cy="50" r="42"></circle>
+                    </svg>
+                    <div class="ringtext" id="kpi_online_pct">0%</div>
+                  </div>
+                </div>
+                <div class="card-bot">
+                  <span class="badge badge-ok">OK</span>
+                  <span class="muted" id="kpi_online_sub">—</span>
+                </div>
+              </div>
 
-        <section class="stats">
-          <div class="card">
-            <div class="k">Devices</div>
-            <div class="v" id="stat_total">0</div>
-          </div>
-          <div class="card">
-            <div class="k">Online</div>
-            <div class="v ok" id="stat_on">0</div>
-          </div>
-          <div class="card">
-            <div class="k">Offline</div>
-            <div class="v bad" id="stat_off">0</div>
-          </div>
-        </section>
+              <div class="card kpi">
+                <div class="card-top">
+                  <div>
+                    <div class="k">Total Hashrate</div>
+                    <div class="v" id="kpi_hash">0 TH/s</div>
+                  </div>
+                  <canvas class="spark" id="sp_hash" width="140" height="36"></canvas>
+                </div>
+                <div class="card-bot">
+                  <span class="badge badge-warn">LIVE</span>
+                  <span class="muted">from cgminer 4028 (best-effort)</span>
+                  <select id="dash_refresh" class="select" title="Dashboard refresh interval">
+                    <option value="5000">5s</option>
+                    <option value="10000" selected>10s</option>
+                    <option value="30000">30s</option>
+                    <option value="60000">1m</option>
+                  </select>
+                </div>
+              </div>
 
-        <section class="tablewrap">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>Status</th>
-                <th>IP</th>
-                <th>MAC</th>
-                <th>Vendor</th>
-                <th>Model</th>
-                <th>Worker</th>
-                <th>Uptime</th>
-                <th>Hashrate</th>
-                <th>Shard</th>
-                <th>First seen</th>
-                <th>Last seen</th>
-              </tr>
-            </thead>
-            <tbody id="tbody">
-            </tbody>
-          </table>
-        </section>
-      </section>
+              <div class="card kpi">
+                <div class="card-top">
+                  <div>
+                    <div class="k">Scanning</div>
+                    <div class="v" id="kpi_scan">idle</div>
+                  </div>
+                  <div class="ringwrap">
+                    <svg class="ring" viewBox="0 0 100 100" aria-label="scan progress">
+                      <circle class="ring-bg" cx="50" cy="50" r="42"></circle>
+                      <circle class="ring-fg warn" id="ring_scan" cx="50" cy="50" r="42"></circle>
+                    </svg>
+                    <div class="ringtext" id="kpi_scan_pct">0%</div>
+                  </div>
+                </div>
+                <div class="card-bot">
+                  <div class="pbar"><div id="scan_bar" class="pfill" style="width:0%"></div></div>
+                </div>
+              </div>
+            </section>
 
-      <section id="page_discovery" class="hidden">
-        <section class="card">
-          <div class="k">Subnet discovery</div>
-          <div class="row">
-            <input id="cidr" class="input" placeholder="Ranges or CIDR, e.g. 10.10.1.10-10.10.1.200,10.10.2.10-10.10.2.200" />
-            <input id="cidr_note" class="input" placeholder="Note (rack/vlan/room)" />
-            <button id="add_subnet" class="btn">Add</button>
-          </div>
-          <div id="cidr_preview" class="hint"></div>
-          <div class="hint">Scan is async (worker pool). Add multiple subnets and run scans independently.</div>
-        </section>
+            <section class="grid">
+              <div class="card span-6">
+                <div class="panel-head">
+                  <div class="panel-title">Offline now</div>
+                  <div class="panel-actions">
+                    <span class="badge badge-bad"><span id="kpi_offline">0</span> offline</span>
+                  </div>
+                </div>
+                <div class="list" id="offline_list"></div>
+              </div>
 
-        <section class="tablewrap">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>On</th>
-                <th>CIDR</th>
-                <th>Note</th>
-                <th>Status</th>
-                <th>Progress</th>
-                <th>Last scan</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="subnets_tbody"></tbody>
-          </table>
-        </section>
-      </section>
+              <div class="card span-3">
+                <div class="panel-head">
+                  <div class="panel-title">Core</div>
+                  <div class="panel-actions">
+                    <span class="pill pill-warn" id="core_nats">nats: —</span>
+                  </div>
+                </div>
+                <div class="kv">
+                  <div class="k">Uptime</div><div class="vsm" id="core_uptime">—</div>
+                  <div class="k">Started</div><div class="vsm" id="core_started">—</div>
+                  <div class="k">Embedded NATS</div><div class="vsm" id="core_embedded">—</div>
+                </div>
+              </div>
 
-      <section id="page_mikrotik" class="hidden">
-        <section class="card">
-          <div class="k">MikroTik (optional)</div>
-          <div class="hint">Will be added as a separate module: register routers, monitor status, show ASIC count per router.</div>
-        </section>
-      </section>
+              <div class="card span-3">
+                <div class="panel-head">
+                  <div class="panel-title">Discovery</div>
+                  <div class="panel-actions">
+                    <button id="scan_all" class="btn">Scan</button>
+                    <button id="stop_all" class="btn">Stop</button>
+                  </div>
+                </div>
+                <div class="kv">
+                  <div class="k">Pools enabled</div><div class="vsm" id="pools_enabled">—</div>
+                  <div class="k">Scanning</div><div class="vsm" id="pools_scanning">—</div>
+                  <div class="k">Now</div><div class="vsm scanline" id="scan_text">—</div>
+                </div>
+              </div>
+            </section>
 
-      <section id="page_creds" class="hidden">
-        <section class="card">
-          <div class="k">Default credentials (reference)</div>
-          <div class="hint">
-            Some ASIC firmwares won't expose any details in HTTP UI until you login.
-            Here are common defaults to try (no passwords are stored in settings).
-          </div>
-          <div class="hint">
-            Enable HTTP default-cred probing in Settings: <b>Try default creds</b>.
-          </div>
-        </section>
+            <section class="panel">
+              <div class="panel-head">
+                <div class="panel-title">Logs</div>
+                <div class="panel-actions">
+                  <input id="log_q" class="input" placeholder="filter…" />
+                </div>
+              </div>
+              <div class="logs" id="logs"></div>
+            </section>
+          </section>
 
-        <section class="tablewrap">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>Vendor</th>
-                <th>Username</th>
-                <th>Password</th>
-                <th>Note</th>
-              </tr>
-            </thead>
-            <tbody id="creds_tbody"></tbody>
-          </table>
-        </section>
-      </section>
+          <!-- DEVICES -->
+          <section id="page_devices" class="hidden">
+            <section class="controls">
+              <input id="q" class="input" placeholder="search ip/mac/vendor/model/worker…" />
+              <select id="online" class="select">
+                <option value="all">all</option>
+                <option value="online">online</option>
+                <option value="offline">offline</option>
+              </select>
+              <select id="asic" class="select">
+                <option value="asic">asic only</option>
+                <option value="all">all devices</option>
+              </select>
+              <select id="vendor" class="select">
+                <option value="all">vendor: all</option>
+              </select>
+              <select id="model" class="select">
+                <option value="all">model: all</option>
+              </select>
+              <button id="refresh" class="btn">Refresh</button>
+            </section>
 
-      <section id="page_settings" class="hidden">
-        <section class="card">
-          <div class="k">Settings</div>
-          <div class="row">
-            <input id="set_nats_url" class="input" placeholder="NATS URL, e.g. nats://127.0.0.1:14222" />
-          </div>
-          <div class="row">
-            <input id="set_nats_prefix" class="input" placeholder="NATS prefix, e.g. mona" />
-          </div>
-          <div class="row">
-            <label class="check">
-              <input id="set_embedded_nats" type="checkbox" />
-              <span>Embedded NATS (JetStream)</span>
-            </label>
-          </div>
-          <div class="row">
-            <input id="set_embedded_host" class="input" placeholder="Embedded host, e.g. 127.0.0.1" />
-          </div>
-          <div class="row">
-            <input id="set_embedded_port" class="input" placeholder="Embedded NATS port, e.g. 14222" />
-          </div>
-          <div class="row">
-            <input id="set_embedded_http_port" class="input" placeholder="Embedded monitoring HTTP port, e.g. 18222" />
-          </div>
-          <div class="row">
-            <input id="set_embedded_store" class="input" placeholder="Embedded store dir, e.g. data/nats" />
-          </div>
-          <div class="row">
-            <input id="set_http_addr" class="input" placeholder="HTTP addr, e.g. :8080" />
-          </div>
-          <div class="row">
-            <label class="check">
-              <input id="set_try_defaults" type="checkbox" />
-              <span>Try default creds for HTTP probes (limited)</span>
-            </label>
-          </div>
-          <div class="row">
-            <button id="save_settings" class="btn">Save</button>
-            <button id="exit_app" class="btn">Exit</button>
-            <span id="nats_status" class="pill pill-warn">nats: unknown</span>
-          </div>
-          <div class="hint">HTTP address change requires restart. NATS settings apply with auto-reconnect.</div>
+            <section class="tablewrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>IP</th>
+                    <th>MAC</th>
+                    <th>Vendor</th>
+                    <th>Model</th>
+                    <th>Worker</th>
+                    <th>Auth</th>
+                    <th>Uptime</th>
+                    <th>Hashrate</th>
+                    <th>Fans</th>
+                    <th>First</th>
+                    <th>Last</th>
+                  </tr>
+                </thead>
+                <tbody id="tbody"></tbody>
+              </table>
+            </section>
+          </section>
+
+          <!-- DEVICE DETAILS -->
+          <section id="page_device" class="hidden">
+            <section class="panel">
+              <div class="panel-head">
+                <div class="panel-title">Device</div>
+                <div class="panel-actions">
+                  <button id="device_back" class="btn">Back</button>
+                  <button id="device_probe" class="btn">Auto-login probe</button>
+                </div>
+              </div>
+              <section class="grid" style="margin:0">
+                <div class="card kpi">
+                  <div class="k">Status</div>
+                  <div class="v" id="dev_status">—</div>
+                  <div class="hint" id="dev_ip">—</div>
+                </div>
+                <div class="card kpi">
+                  <div class="k">Hashrate</div>
+                  <div class="v" id="dev_hash">—</div>
+                  <div class="hint" id="dev_worker">—</div>
+                </div>
+                <div class="card kpi">
+                  <div class="k">Uptime</div>
+                  <div class="v" id="dev_uptime">—</div>
+                  <div class="hint" id="dev_fw">—</div>
+                </div>
+              </section>
+            </section>
+
+            <section class="grid">
+              <div class="card span-6">
+                <div class="panel-head">
+                  <div class="panel-title">Fans</div>
+                  <div class="panel-actions">
+                    <span class="muted">RPM-based animation</span>
+                  </div>
+                </div>
+                <div id="dev_fans" class="fansline"></div>
+              </div>
+              <div class="card span-6">
+                <div class="panel-head">
+                  <div class="panel-title">Temperatures</div>
+                </div>
+                <div id="dev_temps" class="temps"></div>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <div class="panel-title">Probe result</div>
+                <div class="panel-actions">
+                  <span class="pill pill-warn" id="probe_status">idle</span>
+                </div>
+              </div>
+              <pre class="code" id="probe_out">{}</pre>
+            </section>
+          </section>
+
+          <!-- DISCOVERY -->
+          <section id="page_discovery" class="hidden">
+            <section class="card">
+              <div class="k">Address pools</div>
+              <div class="row">
+                <input id="cidr" class="input" placeholder="Ranges or CIDR, e.g. 10.10.1.10-10.10.1.200,10.10.2.10-10.10.2.200" />
+                <input id="cidr_note" class="input" placeholder="Note (rack/vlan/room)" />
+                <button id="add_subnet" class="btn">Add</button>
+              </div>
+              <div id="cidr_preview" class="hint"></div>
+            </section>
+
+            <section class="tablewrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>On</th>
+                    <th>Range/CIDR</th>
+                    <th>Note</th>
+                    <th>Status</th>
+                    <th>Progress</th>
+                    <th>Last scan</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="subnets_tbody"></tbody>
+              </table>
+            </section>
+          </section>
+
+          <!-- CREDS -->
+          <section id="page_creds" class="hidden">
+            <section class="card">
+              <div class="k">Stored credentials (encrypted)</div>
+              <div class="hint">Passwords/logins are stored encrypted in <code>data/settings.json</code>, using <code>data/secret.key</code>. UI never displays saved secrets; edit requires re-entering.</div>
+              <div class="row">
+                <input id="cred_name" class="input" placeholder="Name (e.g. Antminer VnishOS)" />
+                <select id="cred_vendor" class="select">
+                  <option value="antminer">antminer</option>
+                  <option value="whatsminer">whatsminer</option>
+                  <option value="avalonminer">avalonminer</option>
+                  <option value="iceriver">iceriver</option>
+                  <option value="elphapex">elphapex</option>
+                  <option value="generic">generic</option>
+                </select>
+                <select id="cred_firmware" class="select">
+                  <option value="">any firmware</option>
+                  <option value="stock">stock</option>
+                  <option value="vnish">vnish</option>
+                  <option value="custom">custom</option>
+                </select>
+              </div>
+              <div class="row">
+                <input id="cred_user" class="input" placeholder="Username" />
+                <input id="cred_pass" class="input" placeholder="Password" />
+                <input id="cred_pri" class="input" placeholder="Priority (bigger wins)" />
+              </div>
+              <div class="row">
+                <label class="check"><input id="cred_enabled" type="checkbox" checked /> <span>Enabled</span></label>
+                <input id="cred_note" class="input" placeholder="Note" />
+                <button id="cred_save" class="btn">Save</button>
+                <button id="cred_clear" class="btn">Clear</button>
+              </div>
+              <div class="hint" id="cred_editing">creating new</div>
+            </section>
+            <section class="tablewrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Vendor</th>
+                    <th>Firmware</th>
+                    <th>On</th>
+                    <th>Priority</th>
+                    <th>Note</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="stored_creds_tbody"></tbody>
+              </table>
+            </section>
+          </section>
+
+          <!-- SETTINGS -->
+          <section id="page_settings" class="hidden">
+            <section class="card">
+              <div class="k">Settings</div>
+              <div class="row">
+                <input id="set_nats_url" class="input" placeholder="NATS URL, e.g. nats://127.0.0.1:14222" />
+              </div>
+              <div class="row">
+                <input id="set_nats_prefix" class="input" placeholder="NATS prefix, e.g. mona" />
+              </div>
+              <div class="row">
+                <label class="check">
+                  <input id="set_embedded_nats" type="checkbox" />
+                  <span>Embedded NATS (JetStream)</span>
+                </label>
+              </div>
+              <div class="row">
+                <input id="set_embedded_host" class="input" placeholder="Embedded host, e.g. 127.0.0.1" />
+                <input id="set_embedded_port" class="input" placeholder="NATS port, e.g. 14222" />
+                <input id="set_embedded_http_port" class="input" placeholder="HTTP port, e.g. 18222" />
+              </div>
+              <div class="row">
+                <input id="set_embedded_store" class="input" placeholder="Store dir, e.g. data/nats" />
+                <input id="set_http_addr" class="input" placeholder="HTTP addr, e.g. :8080" />
+              </div>
+              <div class="row">
+                <label class="check">
+                  <input id="set_try_defaults" type="checkbox" />
+                  <span>Try default creds for HTTP probes (limited)</span>
+                </label>
+              </div>
+              <div class="row">
+                <button id="save_settings" class="btn">Save</button>
+                <button id="exit_app" class="btn">Exit</button>
+                <span id="nats_status" class="pill pill-warn">nats: unknown</span>
+              </div>
+            </section>
+          </section>
         </section>
-      </section>
-    </main>
+      </main>
+    </div>
 
     <script type="module" src="/app.js"></script>
   </body>

@@ -39,6 +39,10 @@ type Result struct {
 	Worker      string
 	UptimeS     uint64
 	HashrateTHS float64
+
+	// Telemetry (best-effort; vendor specific)
+	FansRPM []int     `json:"fans_rpm,omitempty"`
+	TempsC  []float64 `json:"temps_c,omitempty"`
 }
 
 type Scanner struct {
@@ -353,10 +357,15 @@ func (s *Scanner) fingerprintCGMiner(ctx context.Context, r *Result, host string
 				r.UptimeS = toU64(v)
 			}
 			// Hashrate: try multiple keys
-			if v, ok := m["MHS 5s"]; ok {
-				r.HashrateTHS = toF64(v) / 1e6 // MHS -> THS
-			} else if v, ok := m["MHS av"]; ok {
-				r.HashrateTHS = toF64(v) / 1e6
+			switch {
+			case m["GHS 5s"] != nil:
+				r.HashrateTHS = toF64(m["GHS 5s"]) / 1e3 // GHS -> THS
+			case m["GHS av"] != nil:
+				r.HashrateTHS = toF64(m["GHS av"]) / 1e3
+			case m["MHS 5s"] != nil:
+				r.HashrateTHS = toF64(m["MHS 5s"]) / 1e6 // MHS -> THS
+			case m["MHS av"] != nil:
+				r.HashrateTHS = toF64(m["MHS av"]) / 1e6
 			}
 		}
 	}
@@ -397,6 +406,8 @@ func (s *Scanner) fingerprintCGMiner(ctx context.Context, r *Result, host string
 	if ok {
 		var sr statsResp
 		if json.Unmarshal([]byte(statsRaw), &sr) == nil && len(sr.STATS) > 0 {
+			fans := map[int]int{}
+			temps := map[int]float64{}
 			for _, m := range sr.STATS {
 				// firmware / version keys differ a lot
 				if r.Firmware == "" {
@@ -419,9 +430,91 @@ func (s *Scanner) fingerprintCGMiner(ctx context.Context, r *Result, host string
 						}
 					}
 				}
+
+				// Antminer/bmminer commonly exposes fan1..fan4 and temp1..temp3 in STATS
+				for k, v := range m {
+					kl := strings.ToLower(strings.TrimSpace(k))
+					if strings.HasPrefix(kl, "fan") && len(kl) >= 4 {
+						n, ok := parseSuffixInt(kl, "fan")
+						if ok {
+							rpm := int(toU64(v))
+							if rpm > 0 {
+								fans[n] = rpm
+							} else if _, exists := fans[n]; !exists {
+								// keep zeros so UI can show stopped fans
+								fans[n] = 0
+							}
+						}
+					}
+					if strings.HasPrefix(kl, "temp") && len(kl) >= 5 {
+						n, ok := parseSuffixInt(kl, "temp")
+						if ok {
+							t := toF64(v)
+							if t != 0 {
+								temps[n] = t
+							}
+						}
+					}
+				}
+			}
+
+			if len(fans) > 0 {
+				r.FansRPM = denseInts(fans, 1, 8)
+			}
+			if len(temps) > 0 {
+				r.TempsC = denseFloats(temps, 1, 8)
 			}
 		}
 	}
+}
+
+func parseSuffixInt(s, prefix string) (int, bool) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	prefix = strings.ToLower(prefix)
+	if !strings.HasPrefix(s, prefix) {
+		return 0, false
+	}
+	rest := strings.TrimPrefix(s, prefix)
+	// only accept pure numeric suffix
+	n := 0
+	if rest == "" {
+		return 0, false
+	}
+	for i := 0; i < len(rest); i++ {
+		ch := rest[i]
+		if ch < '0' || ch > '9' {
+			return 0, false
+		}
+		n = n*10 + int(ch-'0')
+	}
+	if n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func denseInts(m map[int]int, from, to int) []int {
+	out := make([]int, 0, to-from+1)
+	for i := from; i <= to; i++ {
+		v, ok := m[i]
+		if !ok {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+func denseFloats(m map[int]float64, from, to int) []float64 {
+	out := make([]float64, 0, to-from+1)
+	for i := from; i <= to; i++ {
+		v, ok := m[i]
+		if !ok {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 func (s *Scanner) score(r *Result) int {

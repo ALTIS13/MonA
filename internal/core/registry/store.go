@@ -24,6 +24,16 @@ type Device struct {
 	HashrateTHS float64 `json:"hashrate_ths,omitempty"`
 	OpenPorts   []int  `json:"open_ports,omitempty"`
 	Confidence  int    `json:"confidence,omitempty"` // 0..100
+
+	// Telemetry (best-effort; vendor specific)
+	FansRPM []int     `json:"fans_rpm,omitempty"`
+	TempsC  []float64 `json:"temps_c,omitempty"`
+
+	// Probe / login status (minimal UI indicator)
+	AuthStatus   string    `json:"auth_status,omitempty"`    // idle/trying/ok/fail
+	AuthUpdated  time.Time `json:"auth_updated,omitempty"`   // last change time
+	AuthCredName string    `json:"auth_cred_name,omitempty"` // which credential succeeded (or last tried)
+	AuthError    string    `json:"auth_error,omitempty"`     // last error (short)
 }
 
 type Store struct {
@@ -107,6 +117,17 @@ func (s *Store) List() []*Device {
 		out = append(out, &cp)
 	}
 	return out
+}
+
+func (s *Store) Get(ip string) (*Device, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	d := s.byIP[ip]
+	if d == nil {
+		return nil, false
+	}
+	cp := *d
+	return &cp, true
 }
 
 // Subscribe emits a signal (coalesced) when the store changes.
