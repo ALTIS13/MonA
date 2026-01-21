@@ -46,52 +46,68 @@ Core principles:
 
 ---
 
-## 3. Fixed Ports and Endpoints (IMPORTANT)
+## 3. Ports and Endpoints (IMPORTANT)
 
-### NATS JetStream (Windows / Docker / on-prem)
+### Core HTTP
 
-| Purpose | Host Port | Container Port | Notes |
-|------|----------|----------------|------|
-| NATS client protocol | 14222 | 4222 | NATS protocol only (no HTTP) |
-| NATS monitoring (HTTP) | 18222 | 8222 | `/varz`, `/jsz`, `/connz` |
+- Default: `:8080`
+- If busy: auto-fallback to `:8081..` and saves to `data/settings.json`
 
-**Canonical NATS start command:**
-```powershell
-docker run -d `
-  --name nats `
-  -p 14222:4222 `
-  -p 18222:8222 `
-  nats:2.10 `
-  -js `
-  -m 8222
-```
+### Embedded NATS JetStream (default)
+
+Enabled by default and configurable in UI → **Settings**:
+
+- NATS client: default `127.0.0.1:14222`
+- NATS monitoring: default `127.0.0.1:18222`
+
+### External NATS (optional)
+
+You can disable embedded NATS and point `NATS URL` to an external server in **Settings**.
 
 ---
 
-## 4. First run (v0 UI)
+## 4. Discovery model (btcTools-like)
 
-### Core (HTTP + UI)
+Discovery is driven by **address pools**, configured in UI → **Discovery**:
+
+- Supports **CIDR** (`10.10.0.0/16`)
+- Supports **manual ranges** (`10.10.1.10-10.10.1.200`)
+- Supports **multiple segments** (comma/newline separated)
+- Pools have **notes** (rack/vlan/room) and **enabled** toggle
+
+Main UI → **Devices** provides:
+
+- **Scan discovery**: scan all enabled pools
+- **Stop scans**: stop all running scans
+- Global progress + per-pool progress
+
+---
+
+## 5. Settings and runtime state
+
+Runtime state is stored in `data/`:
+
+- `data/settings.json` — settings + saved pools
+- `data/nats/` — embedded JetStream storage (if enabled)
+
+These files are runtime-only (not committed).
+
+---
+
+## 6. First run (Windows / PowerShell)
 
 ```powershell
 cd .\asic-control
-# Use your .env or set env vars manually
 go run .\cmd\core
 ```
 
-Open UI: `http://127.0.0.1:8080/`
+Open UI at the printed address (e.g. `http://127.0.0.1:8080/`).
 
-### MikroTik discovery service
-
-```powershell
-cd .\asic-control
-go run .\cmd\mikrotik
-```
-
-When events flow, the UI updates in realtime (SSE) and `/api/devices` reflects current state.
+To stop correctly (free ports): UI → **Settings** → **Exit**.
 
 ---
 
-## 5. Portability (copy to another PC)
+## 7. Portability (copy to another PC)
 
 If you want to move the project folder to another machine and build/run with minimal network dependency:
 
